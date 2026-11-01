@@ -1,0 +1,39 @@
+{
+  "name": "waterbot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Waterbot：QQ 群长期成员与个人 Agent",
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "dev": "concurrently --names server,web --prefix-colors cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev --workspace @waterbot/server",
+    "dev:web": "npm run dev --workspace @waterbot/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "test:unit": "npm run test:unit --workspaces --if-present",
+    "test:runtime": "npm run test:runtime --workspace @waterbot/server",
+    "test:integration": "npm run test:integration --workspace @waterbot/server",
+    "check": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run build",
+    "pg:start": "npm run pg:start --workspace @waterbot/server",
+    "pg:stop": "npm run pg:stop --workspace @waterbot/server",
+    "pg:status": "npm run pg:status --workspace @waterbot/server",
+    "db:migrate": "npm run db:migrate --workspace @waterbot/server",
+    "build": "npm run build --workspaces --if-present",
+    "start": "npm run start --workspace @waterbot/server"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "concurrently": "^10.0.6",
+    "eslint": "^10.13.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.13.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.1"
+  }
+}

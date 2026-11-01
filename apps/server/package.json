@@ -1,0 +1,38 @@
+{
+  "name": "@waterbot/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsup",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json",
+    "test:unit": "vitest run",
+    "test:runtime": "vitest run src/runtime",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "pg:start": "tsx src/cli/db.ts start",
+    "pg:stop": "tsx src/cli/db.ts stop",
+    "pg:status": "tsx src/cli/db.ts status",
+    "db:migrate": "tsx src/cli/db.ts migrate"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "@types/ws": "^8.18.2",
+    "tsup": "^9.0.0",
+    "tsx": "^4.23.15",
+    "vitest": "^5.0.5",
+    "ws": "^8.22.1"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0",
+    "pg": "^8.23.1"
+  },
+  "optionalDependencies": {
+    "@embedded-postgres/windows-x64": "^18.4.0-beta.17"
+  }
+}

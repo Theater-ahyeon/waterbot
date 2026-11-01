@@ -1,0 +1,58 @@
+# 依赖
+node_modules/
+.pnp.*
+.yarn/*
+
+# 构建与缓存输出
+dist/
+build/
+out/
+.vite/
+.turbo/
+*.tsbuildinfo
+coverage/
+
+# 秘密与本地环境
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# 本地数据库（开发期业务库 / Pi 运行库）
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+pgdata/
+data/
+
+# 运行日志
+*.log
+logs/
+npm-debug.log*
+pnpm-debug.log*
+
+# 本机工作区私有数据（会话记忆 / 日志，不随源码提交）
+.workbuddy/
+
+# 浏览器 / 桌面自动化资料
+.browser-profile/
+browser-profiles/
+*.har
+
+# 编辑器与系统文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
