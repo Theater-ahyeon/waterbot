@@ -10,6 +10,7 @@ export default tseslint.config(
       '**/dist/**',
       '**/coverage/**',
       '**/.vite/**',
+      '**/apps/server/data/**',
     ],
   },
   js.configs.recommended,
@@ -19,6 +20,13 @@ export default tseslint.config(
     languageOptions: {
       ecmaVersion: 2023,
       globals: { ...globals.node, ...globals.browser },
+    },
+  },
+  {
+    files: ['apps/server/src/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      globals: globals.node,
     },
   },
   {

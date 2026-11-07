@@ -8,11 +8,13 @@ import type { GroupArchive } from '../archive'
 import { entryText } from '../chat'
 import { ingestInboundEvent } from '../inbound/ingest'
 import { groupMessageHeader, type Memories } from '../memory'
+import type { MemoryExtractor } from '../memory-extraction'
 import type { Pool } from '../pg/connection'
 import type { ConversationTarget, Profiles } from '../profiles'
 import type { AgentRuntime } from '../runtime'
+import { recordUsage, totalTokens, usageForConversation } from '../usage'
 import { OneBotClient } from './client'
-import { parseMessage, parseOwnerCommand, textMessage, type OwnerCommand, type QqMessage } from './onebot'
+import { attachmentSummary, parseMessage, parseOwnerCommand, parseRecall, textMessage, type OwnerCommand, type QqMessage } from './onebot'
 
 export const QQ_SEND = 'qq.send'
 const MAX_REPLY_CHARS = 4000
@@ -27,6 +29,8 @@ export interface QqConfig {
   profileId?: string
   /** 真实外发需要 owner 单独打开；关闭时只接收，不发送 */
   allowSend: boolean
+  /** 每个会话 24 小时模型 token 上限；0 表示不限制 */
+  dailyTokenLimit?: number
   callTimeoutMs?: number
   baseBackoffMs?: number
 }
@@ -41,6 +45,13 @@ export interface QqStatus {
 }
 
 interface QqPayload { message: string; qq: { target: string } }
+
+/** 例行任务的 outbox 也走同一个对账循环；只有带 qq.target 的才发送。 */
+interface JobPayload {
+  message?: string
+  qq?: { target?: string }
+  routine?: { id?: string }
+}
 
 /**
  * QQ 入站路由与出站投递。
@@ -63,6 +74,7 @@ export class QqBridge {
     private readonly archive: GroupArchive,
     private readonly memories: Memories,
     private readonly config: QqConfig,
+    private readonly extractor?: MemoryExtractor,
   ) {
     this.account = `onebot:${config.botId}`
     this.client = new OneBotClient(config.url, config.token, {
@@ -76,6 +88,7 @@ export class QqBridge {
   }
 
   start(): void {
+    this.enqueue(() => this.openGap('server_started'))
     this.client.start()
     this.timer = setInterval(() => { void this.pump() }, 500)
   }
@@ -86,6 +99,7 @@ export class QqBridge {
     this.client.close()
     await this.queue
     await this.running
+    await this.openGap('server_stopped')
   }
 
   /** 事件串行处理：额度计数和停止状态不会被并发穿过。 */
@@ -99,11 +113,16 @@ export class QqBridge {
     await this.pool.query('update qq_connection_gap set ended_at = clock_timestamp() where account_id = $1 and ended_at is null', [this.account])
   }
 
-  private async markDown(reason: string): Promise<void> {
+  private async openGap(reason: string): Promise<void> {
     await this.pool.query(
-      `insert into qq_connection_gap(id, account_id, reason) values ($1,$2,$3) on conflict (account_id) where ended_at is null do nothing`,
+      `insert into qq_connection_gap(id, account_id, reason) values ($1,$2,$3)
+       on conflict (account_id) where ended_at is null do nothing`,
       [randomUUID(), this.account, reason],
     )
+  }
+
+  private async markDown(reason: string): Promise<void> {
+    await this.openGap(reason)
   }
 
   private groupRef(groupId: string): string {
@@ -122,6 +141,11 @@ export class QqBridge {
   }
 
   private async handle(raw: unknown): Promise<void> {
+    const recall = parseRecall(raw)
+    if (recall) {
+      await this.archive.recall(this.groupRef(recall.groupId), recall.messageId)
+      return
+    }
     const message = parseMessage(raw, this.config.botId)
     if (!message) return
     if (message.kind === 'private') {
@@ -221,10 +245,11 @@ export class QqBridge {
     )).rows[0]
     if (!group) return
     const addressed = await this.triggered(message)
+    const content = message.text || attachmentSummary(message.attachments)
     // 接入的群全量存档：停止、暂停、超额都只影响回复。
     const archiveId = await this.archive.record({
       groupRef: this.groupRef(groupId), externalEventId: this.externalId(message), platformMessageId: message.messageId,
-      userId: message.userId, content: message.text, hasAttachment: message.hasAttachment, addressedBot: addressed, occurredAt: new Date(message.time * 1000),
+      userId: message.userId, content, hasAttachment: message.hasAttachment, addressedBot: addressed, occurredAt: new Date(message.time * 1000),
       ...(message.nickname ? { nickname: message.nickname } : {}),
       ...(message.replyTo ? { replyTo: message.replyTo } : {}),
     })
@@ -239,8 +264,17 @@ export class QqBridge {
     const { key } = await this.profiles.conversation(profileId, {
       suffix: `qq_group:${groupId}`, scopeKind: 'qq_group', scopeRef: this.groupRef(groupId), readableGroups: [],
     })
+    if (await this.overBudget(key)) return
     // 只带平台 ID：昵称可被群友随意修改，不进入身份。
-    await this.ingest(message, `${groupMessageHeader(message.userId, archiveId)}${message.text}`, target, key)
+    await this.ingest(message, `${groupMessageHeader(message.userId, archiveId)}${content}`, target, key)
+  }
+
+  /** 超额后只保留已写入的群存档，不再创建新的模型任务。 */
+  private async overBudget(conversationKey: string): Promise<boolean> {
+    const limit = this.config.dailyTokenLimit ?? 0
+    if (limit <= 0) return false
+    const usage = await usageForConversation(this.pool, conversationKey, new Date(Date.now() - 24 * 60 * 60 * 1000))
+    return totalTokens(usage) >= limit
   }
 
   private async ingest(message: QqMessage, text: string, target: string, conversationKey: string): Promise<void> {
@@ -268,31 +302,86 @@ export class QqBridge {
 
   /** 从 Pi 回执推进作业并生成发送动作；崩溃后重跑时 Action 的语义键保证不重复。 */
   private async reconcile(): Promise<void> {
-    const jobs = (await this.pool.query<{ id: string; pi_conversation_id: string; pi_submission_id: string; dispatch_outbox_id: string; payload: QqPayload }>(
-      `select j.id, j.pi_conversation_id, j.pi_submission_id, j.dispatch_outbox_id, e.payload
-         from job j join dispatch_outbox o on o.id = j.dispatch_outbox_id join inbound_event e on e.id = o.inbound_event_id
-        where e.source = $1 and j.status = 'dispatched' order by j.created_at limit 20`, [this.account],
+    const jobs = (await this.pool.query<{
+      id: string; pi_conversation_id: string; pi_submission_id: string; dispatch_outbox_id: string;
+      payload: JobPayload; conversation_key: string; profile_id: string
+    }>(
+      `select j.id, j.pi_conversation_id, j.pi_submission_id, j.dispatch_outbox_id, e.payload,
+              o.conversation_key, b.profile_id
+         from job j
+         join dispatch_outbox o on o.id = j.dispatch_outbox_id
+         join inbound_event e on e.id = o.inbound_event_id
+         join conversation_binding b on b.pi_conversation_id = j.pi_conversation_id
+        where (e.source = $1
+               or (e.source = 'routine' and e.payload->'delivery'->>'kind' in ('qq_private', 'qq_group')))
+          and j.status = 'dispatched' order by j.created_at limit 20`, [this.account],
     )).rows
     for (const job of jobs) {
       if (this.closed) return
+      const routineId = job.payload.routine?.id
+      if (routineId) {
+        const routine = (await this.pool.query<{ status: string }>('select status from routine where id = $1', [routineId])).rows[0]
+        if (!routine || routine.status === 'paused' || !this.config.allowSend || await this.stopped()) {
+          await this.pool.query(`update job set status = 'failed', pi_status = 'blocked', updated_at = now() where id = $1`, [job.id])
+          continue
+        }
+      }
+      const target = job.payload.qq?.target
+      if (!target) {
+        await this.pool.query(`update job set status = 'failed', pi_status = 'invalid_target', updated_at = now() where id = $1`, [job.id])
+        continue
+      }
       const submission = await this.runtime.harness.submission(Number(job.pi_submission_id) as SubmissionId, BACKGROUND_CONTEXT)
       if (!submission) throw new Error('持久提交不存在')
       const record = await submission.status(BACKGROUND_CONTEXT)
       if (record.status !== 'done' && record.status !== 'unanswered') continue
-      if (!(await this.stopped())) {
-        const text = record.status === 'done' && 'answer' in record ? await this.answerText(job.pi_conversation_id, record.answer) : FAILURE_REPLY
-        if (text) await this.reply(job.payload.qq.target, text, job.dispatch_outbox_id)
+      let text = FAILURE_REPLY
+      if (record.status === 'done' && 'answer' in record) {
+        const conversation = await this.runtime.harness.conversation(Number(job.pi_conversation_id) as ConversationId, BACKGROUND_CONTEXT)
+        const view = await conversation?.context(BACKGROUND_CONTEXT)
+        const entry = view?.entries.find((item) => item.id === record.answer)
+        if (entry) {
+          text = entryText(entry)
+          try {
+            await recordUsage(this.pool, {
+              profileId: job.profile_id,
+              conversationKey: job.conversation_key,
+              jobId: job.id,
+              entryId: String(record.answer),
+              model: entry.model,
+              provider: this.runtime.model.provider,
+              modelId: this.runtime.model.modelId,
+            })
+          } catch (error) {
+            console.error('[qq] 用量记录失败:', error instanceof Error ? error.message : String(error))
+          }
+        }
+      }
+      if (!(await this.stopped()) && text) await this.reply(target, text, job.dispatch_outbox_id)
+      if (record.status === 'done' && this.extractor && target.startsWith('group:')) {
+        const trigger = /\[群成员 \d+ · 消息 ([0-9a-f-]{36})\]/.exec(job.payload.message ?? '')?.[1]
+        if (trigger) {
+          try {
+            await this.extractor.enqueue({
+              profileId: job.profile_id,
+              conversationKey: job.conversation_key,
+              jobId: job.id,
+              groupRef: this.groupRef(target.slice('group:'.length)),
+              triggerMessageId: trigger,
+            })
+          } catch (error) {
+            console.error('[qq] 记忆提取入队失败:', error instanceof Error ? error.message : String(error))
+          }
+        }
       }
       await this.pool.query('update job set status = $2, pi_status = $3, updated_at = now() where id = $1',
         [job.id, record.status === 'done' ? 'completed' : 'failed', record.status])
     }
   }
 
-  private async answerText(piConversationId: string, answer: unknown): Promise<string> {
-    const conversation = await this.runtime.harness.conversation(Number(piConversationId) as ConversationId, BACKGROUND_CONTEXT)
-    const view = await conversation?.context(BACKGROUND_CONTEXT)
-    const entry = view?.entries.find((item) => item.id === answer)
-    return entry ? entryText(entry) : ''
+  /** 只读扩展动作入口（QQ 空间等）；错误由调用方处理。 */
+  async call(action: string, params: Record<string, unknown>): Promise<unknown> {
+    return this.client.call(action, params)
   }
 
   /** Action 执行端入口：抛错一律记为 unknown，不补发。 */
@@ -302,7 +391,21 @@ export class QqBridge {
       ? { group_id: Number(id), message: textMessage(action.payload.message) }
       : { user_id: Number(id), message: textMessage(action.payload.message) }
     const data = await this.client.call(kind === 'group' ? 'send_group_msg' : 'send_private_msg', params) as { message_id?: unknown } | null
-    return String(data?.message_id ?? '')
+    const receipt = String(data?.message_id ?? '')
+    if (kind === 'group' && receipt) {
+      try {
+        await this.archive.recordBot({
+          groupRef: this.groupRef(id),
+          platformMessageId: receipt,
+          botId: this.config.botId,
+          content: action.payload.message,
+          occurredAt: new Date(),
+        })
+      } catch (error) {
+        console.error('[qq] Bot 发言补档失败:', error instanceof Error ? error.message : String(error))
+      }
+    }
+    return receipt
   }
 
   async status(): Promise<QqStatus> {

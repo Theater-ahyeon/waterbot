@@ -152,7 +152,7 @@ describe('QQ 路由与发送（模拟 OneBot + 真实 PG / Pi）', () => {
   })
 
   beforeEach(async () => {
-    await db.pool.query('truncate group_message, group_member, qq_group, qq_control, qq_connection_gap, memory_version, memory, memory_source, context_manifest, approval, action, action_policy, job, dispatch_outbox, inbound_event, conversation_binding')
+    await db.pool.query('truncate routine_occurrence, routine, memory_extraction, model_usage, group_message, group_member, qq_group, qq_control, qq_connection_gap, memory_version, memory, memory_source, context_manifest, approval, action, action_policy, job, dispatch_outbox, inbound_event, conversation_binding')
     await boot()
     ownerSays(`接入群 ${GROUP}`)
     await waitFor(() => fake.sent.length === 1, '接入回执')
@@ -174,7 +174,9 @@ describe('QQ 路由与发送（模拟 OneBot + 真实 PG / Pi）', () => {
     const call = fake.sent[0]!
     expect(call.action).toBe('send_group_msg')
     expect(call.params.group_id).toBe(GROUP)
-    expect(call.params.message[0]!.data.text).toContain(`[群成员 ${STRANGER} · 消息 `)
+    const replyText = call.params.message[0]!.data.text
+    expect(replyText).toContain('今天吃什么')
+    expect(replyText).not.toContain('[群成员 ')
     await settle()
     expect(fake.sent.filter((item) => item.action === 'send_group_msg')).toHaveLength(1)
     const action = (await db.pool.query('select status, receipt, kind from action where target_ref = $1', [`group:${GROUP}`])).rows
@@ -277,9 +279,9 @@ describe('QQ 路由与发送（模拟 OneBot + 真实 PG / Pi）', () => {
   it('掉线记录缺口，自动重连后结束缺口并继续工作', async () => {
     const connections = fake.connections
     fake.socket!.terminate()
-    await waitFor(async () => (await bridge.status()).gaps.length === 1, '缺口记录')
+    await waitFor(async () => (await bridge.status()).gaps.some((gap) => gap.ended_at === null), '缺口记录')
     await waitFor(() => fake.connections > connections && fake.socket?.readyState === 1, '自动重连')
-    await waitFor(async () => (await bridge.status()).gaps[0]!.ended_at !== null, '缺口结束')
+    await waitFor(async () => (await bridge.status()).gaps.every((gap) => gap.ended_at !== null), '缺口结束')
     expect((await bridge.status()).state).toBe('ready')
     fake.send(groupEvent('重连后'))
     await waitFor(() => fake.sent.length === 1, '重连后回复')
@@ -329,8 +331,21 @@ describe('QQ 路由与发送（模拟 OneBot + 真实 PG / Pi）', () => {
     await waitFor(() => fake.sent.length === 3, '停止回执')
     fake.send(groupEvent('停止中'))
     await settle()
-    expect((await db.pool.query('select count(*)::int as n from group_message')).rows[0].n).toBe(4)
+    const archived = await db.pool.query<{ is_bot: boolean; n: number }>(
+      `select u.is_bot, count(*)::int as n from group_message m join group_member u on u.id = m.member_id group by u.is_bot order by u.is_bot`,
+    )
+    expect(archived.rows).toEqual([{ is_bot: false, n: 4 }, { is_bot: true, n: 1 }])
     expect((await db.pool.query('select count(*)::int as n from job')).rows[0].n).toBe(1)
+  })
+
+  it('平台撤回后不再参与检索和统计，原文保留', async () => {
+    fake.send(groupEvent('撤回这句', { at: false, id: 9001 }))
+    await waitFor(async () => (await db.pool.query(`select 1 from group_message where platform_message_id = '9001'`)).rowCount === 1, '原始消息入库')
+    fake.send({ post_type: 'notice', notice_type: 'group_recall', self_id: Number(BOT), group_id: GROUP, message_id: 9001 })
+    await waitFor(async () => (await db.pool.query(`select 1 from group_message where platform_message_id = '9001' and recalled_at is not null`)).rowCount === 1, '撤回标记')
+    const result = await archive.search([`onebot:${BOT}:${GROUP}`], '撤回这句')
+    expect(result.total).toBe(0)
+    expect((await db.pool.query(`select content from group_message where platform_message_id = '9001'`)).rows[0].content).toBe('撤回这句')
   })
 
   it('同一件事说 7 次：工具给出数据库总数、原话和时间；别的群和陌生词查不到', async () => {

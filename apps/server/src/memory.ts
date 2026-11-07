@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import { renderHistoryBlock, type GroupArchive } from './archive'
 import { HttpError, textField } from './http'
@@ -23,7 +23,9 @@ export interface Memory {
   content: string
   epistemic_status: EpistemicStatus
   source_id: string
+  source_kind: string
   source_actor: string
+  message_id: string | null
   occurred_at: Date
   recorded_at: Date
 }
@@ -33,7 +35,9 @@ export interface MemoryVersion {
   content: string
   epistemic_status: EpistemicStatus
   source_id: string
+  source_kind: string
   source_actor: string
+  message_id: string | null
   excerpt: string
   occurred_at: Date
   recorded_at: Date
@@ -66,7 +70,8 @@ export interface ContextRequest {
 const KINDS = new Set<string>(['fact', 'preference', 'constraint', 'experience', 'todo'])
 const CURRENT_MEMORY = `
   select m.id, m.profile_id, m.scope_kind, m.scope_ref, m.kind, m.subject, m.state, m.version,
-         v.content, v.epistemic_status, v.source_id, s.source_actor, s.occurred_at, v.recorded_at
+         v.content, v.epistemic_status, v.source_id, s.source_kind, s.source_actor, s.message_id,
+         s.occurred_at, v.recorded_at
     from memory m
     join memory_version v on v.memory_id = m.id and v.version = m.version
     join memory_source s on s.id = v.source_id`
@@ -203,7 +208,8 @@ export class Memories {
     const memory = (await this.pool.query<Memory>(`${CURRENT_MEMORY} where m.id = $1`, [id])).rows[0]
     if (!memory) throw new HttpError(404, '记忆不存在')
     const versions = (await this.pool.query<MemoryVersion>(
-      `select v.version, v.content, v.epistemic_status, v.source_id, s.source_actor, s.excerpt, s.occurred_at, v.recorded_at, v.superseded_at
+      `select v.version, v.content, v.epistemic_status, v.source_id, s.source_kind, s.source_actor,
+              s.message_id, s.excerpt, s.occurred_at, v.recorded_at, v.superseded_at
          from memory_version v join memory_source s on s.id = v.source_id
         where v.memory_id = $1 order by v.version desc`, [id],
     )).rows
@@ -232,6 +238,7 @@ export class Memories {
         [id, memory.version + 1, content, sourceId],
       )
       await client.query('update memory set version = $2, updated_at = clock_timestamp() where id = $1', [id, memory.version + 1])
+      await this.bumpEpoch(client)
       return this.current(client, id)
     })
   }
@@ -244,25 +251,64 @@ export class Memories {
       if (memory.state === 'archived') return this.current(client, id)
       if (memory.version !== expected) throw new HttpError(409, '记忆已被修改，请刷新后再操作')
       await client.query(`update memory set state = 'archived', updated_at = clock_timestamp() where id = $1`, [id])
+      await this.bumpEpoch(client)
       return this.current(client, id)
     })
   }
 
   /** 按内容忘记：只影响当前版本包含该文字的记忆。 */
   async forgetMatching(profileId: string, text: string): Promise<number> {
-    return (await this.pool.query(
-      `update memory m set state = 'archived', updated_at = clock_timestamp()
-         from memory_version v
-        where v.memory_id = m.id and v.version = m.version and m.profile_id = $1 and m.state = 'active'
-          and position(lower($2) in lower(v.content)) > 0`, [profileId, text],
-    )).rowCount ?? 0
+    return withTransaction(this.pool, async (client) => {
+      const count = (await client.query(
+        `update memory m set state = 'archived', updated_at = clock_timestamp()
+           from memory_version v
+          where v.memory_id = m.id and v.version = m.version and m.profile_id = $1 and m.state = 'active'
+            and position(lower($2) in lower(v.content)) > 0`, [profileId, text],
+      )).rowCount ?? 0
+      if (count > 0) await this.bumpEpoch(client)
+      return count
+    })
   }
 
   async forgetGroup(profileId: string, groupRef: string): Promise<number> {
-    return (await this.pool.query(
-      `update memory set state = 'archived', updated_at = clock_timestamp()
-        where profile_id = $1 and state = 'active' and scope_kind = 'qq_group' and scope_ref = $2`, [profileId, groupRef],
-    )).rowCount ?? 0
+    return withTransaction(this.pool, async (client) => {
+      const count = (await client.query(
+        `update memory set state = 'archived', updated_at = clock_timestamp()
+          where profile_id = $1 and state = 'active' and scope_kind = 'qq_group' and scope_ref = $2`, [profileId, groupRef],
+      )).rowCount ?? 0
+      if (count > 0) await this.bumpEpoch(client)
+      return count
+    })
+  }
+
+  /** 忘记后旧 epoch 的待执行动作失效；这是保守的全局递增。 */
+  private async bumpEpoch(client: PoolClient): Promise<void> {
+    await client.query('update owner_context set epoch = epoch + 1 where id = 1')
+  }
+
+  /**
+   * 物理清除一条记忆及其来源。Pi 对话历史不在本次范围，返回给 owner 说明。
+   */
+  async purge(id: string): Promise<{ memory: boolean; versions: number; sources: number; note: string }> {
+    return withTransaction(this.pool, async (client) => {
+      const memory = (await client.query('select id from memory where id = $1 for update', [id])).rows[0]
+      if (!memory) throw new HttpError(404, '记忆不存在')
+      const sourceIds = (await client.query<{ source_id: string }>(
+        'select source_id from memory_version where memory_id = $1', [id],
+      )).rows.map((row) => row.source_id)
+      const versions = (await client.query('delete from memory_version where memory_id = $1', [id])).rowCount ?? 0
+      await client.query('delete from memory where id = $1', [id])
+      let sources = 0
+      if (sourceIds.length) {
+        sources = (await client.query(
+          `delete from memory_source s
+            where s.id = any($1::text[])
+              and not exists (select 1 from memory_version v where v.source_id = s.id)`, [sourceIds],
+        )).rowCount ?? 0
+      }
+      await this.bumpEpoch(client)
+      return { memory: true, versions, sources, note: 'Pi 对话历史未删除；如需清除请另行说明范围' }
+    })
   }
 
   async manifests(profileId: string): Promise<ContextManifest[]> {
@@ -315,23 +361,74 @@ export class Memories {
     })
   }
 
-  private async insertSource(client: PoolClient, profileId: string, externalRef: string, excerpt: string, actor: string, occurredAt?: Date): Promise<string | undefined> {
+  private async insertSource(
+    client: PoolClient,
+    profileId: string,
+    externalRef: string,
+    excerpt: string,
+    actor: string,
+    occurredAt?: Date,
+    sourceKind = 'owner_statement',
+    messageId?: string,
+  ): Promise<string | undefined> {
     return (await client.query<{ id: string }>(
-      `insert into memory_source(id, profile_id, source_kind, source_actor, external_ref, excerpt, occurred_at)
-       values ($1,$2,'owner_statement',$3,$4,$5,coalesce($6::timestamptz, clock_timestamp()))
+      `insert into memory_source(id, profile_id, source_kind, source_actor, external_ref, excerpt, occurred_at, message_id)
+       values ($1,$2,$7,$3,$4,$5,coalesce($6::timestamptz, clock_timestamp()),$8)
        on conflict (source_kind, external_ref) do nothing returning id`,
-      [randomUUID(), profileId, actor, externalRef, excerpt, occurredAt ?? null],
+      [randomUUID(), profileId, actor, externalRef, excerpt, occurredAt ?? null, sourceKind, messageId ?? null],
     )).rows[0]?.id
   }
 
   /** 重投同一请求返回原记忆；同一请求 ID 换内容不能静默合并。 */
-  private async bySource(client: PoolClient, externalRef: string, excerpt: string): Promise<Memory> {
+  private async bySource(client: PoolClient, externalRef: string, excerpt: string, sourceKind = 'owner_statement'): Promise<Memory> {
     const source = (await client.query<{ excerpt: string; memory_id: string }>(
       `select s.excerpt, v.memory_id from memory_source s join memory_version v on v.source_id = s.id
-        where s.source_kind = 'owner_statement' and s.external_ref = $1`, [externalRef],
+        where s.source_kind = $2 and s.external_ref = $1`, [externalRef, sourceKind],
     )).rows[0]
     if (!source || source.excerpt !== excerpt) throw new HttpError(409, '同一请求的内容已变化，请重新发送')
     return this.current(client, source.memory_id)
+  }
+
+  /**
+   * 群消息提取的写入路径：只接受 reported 事实 / 偏好 / 经历 / 待办，绝不写 constraint。
+   * 来源保留原群消息 ID，重投同一消息同一内容返回原记录。
+   */
+  async rememberGroup(
+    profileId: string,
+    groupRef: string,
+    input: {
+      messageId: string
+      actor: string
+      kind: Exclude<MemoryKind, 'constraint'>
+      subject: string
+      content: string
+      occurredAt: Date
+    },
+  ): Promise<Memory> {
+    if (!groupRef.trim()) throw new HttpError(400, '群作用域不能为空')
+    if ((input.kind as string) === 'constraint' || !KINDS.has(input.kind)) throw new HttpError(400, '群记忆类型无效')
+    const subject = textField(input.subject, '主题', 160).trim()
+    const content = textField(input.content, '内容', 1000)
+    const digest = createHash('sha256').update(`${input.kind}\n${subject}\n${content}`).digest('hex').slice(0, 20)
+    const externalRef = `group:${input.messageId}:${digest}`
+    return withTransaction(this.pool, async (client) => {
+      const sourceId = await this.insertSource(
+        client, profileId, externalRef, content, input.actor, input.occurredAt, 'group_message', input.messageId,
+      )
+      if (!sourceId) return this.bySource(client, externalRef, content, 'group_message')
+      const memoryId = randomUUID()
+      await client.query(
+        `insert into memory(id, profile_id, scope_kind, scope_ref, kind, subject)
+         values ($1,$2,'qq_group',$3,$4,$5)`,
+        [memoryId, profileId, groupRef, input.kind, subject],
+      )
+      await client.query(
+        `insert into memory_version(memory_id, version, content, epistemic_status, source_id)
+         values ($1, 1, $2, 'reported', $3)`,
+        [memoryId, content, sourceId],
+      )
+      return this.current(client, memoryId)
+    })
   }
 
   private async locked(client: PoolClient, id: string): Promise<{ profile_id: string; state: string; version: number }> {

@@ -13,9 +13,9 @@ export class OwnerAuth {
   private failures = 0
   private resetAt = 0
 
-  private constructor(private readonly pool: Pool, private readonly keyHash: string) {}
+  private constructor(private readonly pool: Pool, private readonly keyHash: string, private readonly secure: boolean) {}
 
-  static async open(pool: Pool, keyPath: string): Promise<OwnerAuth> {
+  static async open(pool: Pool, keyPath: string, options: { secure?: boolean } = {}): Promise<OwnerAuth> {
     await mkdir(dirname(keyPath), { recursive: true })
     try {
       await writeFile(keyPath, `pa_${randomBytes(32).toString('base64url')}\n`, { flag: 'wx', mode: 0o600 })
@@ -24,7 +24,7 @@ export class OwnerAuth {
     }
     const key = (await readFile(keyPath, 'utf8')).trim()
     if (key.length < 32) throw new Error('本机访问码文件无效，请恢复或重新生成')
-    return new OwnerAuth(pool, hash(key))
+    return new OwnerAuth(pool, hash(key), options.secure === true)
   }
 
   async login(key: unknown): Promise<string> {
@@ -44,7 +44,7 @@ export class OwnerAuth {
       [hash(token)],
     )
     this.failures = 0
-    return `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${LIFETIME_SECONDS}`
+    return `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${LIFETIME_SECONDS}${this.secure ? '; Secure' : ''}`
   }
 
   async session(cookie: string | undefined): Promise<string | undefined> {
@@ -57,6 +57,6 @@ export class OwnerAuth {
 
   async logout(tokenHash: string): Promise<string> {
     await this.pool.query('delete from owner_session where token_hash = $1', [tokenHash])
-    return `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`
+    return `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${this.secure ? '; Secure' : ''}`
   }
 }

@@ -12,15 +12,19 @@
     "test:unit": "vitest run",
     "test:runtime": "vitest run src/runtime",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "backup": "tsx src/cli/backup.ts backup",
+    "restore": "tsx src/cli/backup.ts restore",
     "pg:start": "tsx src/cli/db.ts start",
     "pg:stop": "tsx src/cli/db.ts stop",
     "pg:status": "tsx src/cli/db.ts status",
     "db:migrate": "tsx src/cli/db.ts migrate"
   },
   "devDependencies": {
+    "@types/mailparser": "^3.9.0",
     "@types/node": "^26.6.5",
     "@types/pg": "^8.23.1",
     "@types/ws": "^8.18.2",
+    "jszip": "^3.10.2",
     "tsup": "^9.0.0",
     "tsx": "^4.23.15",
     "vitest": "^5.0.5",
@@ -30,7 +34,18 @@
     "@earendil-works/chord": "1.4.0",
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-durable": "1.4.0",
-    "pg": "^8.23.1"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "docx": "^9.15.2",
+    "exceljs": "^4.4.0",
+    "ical.js": "^2.2.1",
+    "imapflow": "^2.11.0",
+    "mailparser": "^3.7.4",
+    "nodemailer": "^10.3.1",
+    "pg": "^8.23.1",
+    "playwright-core": "^1.65.0",
+    "pptxgenjs": "^4.0.1",
+    "tsdav": "^2.5.0",
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "@embedded-postgres/windows-x64": "^18.4.0-beta.17"

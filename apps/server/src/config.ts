@@ -10,6 +10,8 @@ export interface QqEnvConfig {
   ownerId: string
   profileId?: string
   allowSend: boolean
+  /** 每个 QQ 会话 24 小时模型 token 上限；0 表示不限制 */
+  dailyTokenLimit: number
 }
 
 /** 三项全空视为未启用；只填一部分是配置错误，不带病启动。QQ_ALLOW_SEND=1 才允许外发。 */
@@ -23,7 +25,13 @@ export function loadQqConfig(env: NodeJS.ProcessEnv): QqEnvConfig | undefined {
   if (botId === ownerId) throw new Error('QQ_BOT_ID 不能与 QQ_OWNER_ID 相同：Bot 使用专用小号')
   const token = env.ONEBOT_ACCESS_TOKEN?.trim()
   const profileId = env.QQ_PROFILE_ID?.trim()
-  return { url, botId, ownerId, allowSend: env.QQ_ALLOW_SEND?.trim() === '1', ...(token ? { token } : {}), ...(profileId ? { profileId } : {}) }
+  const rawLimit = env.QQ_DAILY_TOKEN_LIMIT?.trim()
+  const dailyTokenLimit = rawLimit ? Number(rawLimit) : 0
+  if (!Number.isInteger(dailyTokenLimit) || dailyTokenLimit < 0) throw new Error('QQ_DAILY_TOKEN_LIMIT 必须是非负整数')
+  return {
+    url, botId, ownerId, allowSend: env.QQ_ALLOW_SEND?.trim() === '1', dailyTokenLimit,
+    ...(token ? { token } : {}), ...(profileId ? { profileId } : {}),
+  }
 }
 
 export interface ServerConfig {
@@ -33,6 +41,10 @@ export interface ServerConfig {
   runtimeDatabasePath?: string
   /** 覆盖本地工具副作用目录；未设置时由启动入口用项目内默认路径 */
   runtimeNotesDirectory?: string
+  /** 覆盖运行数据根目录；未设置时为 apps/server/data */
+  dataDirectory?: string
+  /** 反向代理对外地址；设置后允许该 Host / Origin，server 仍只监听回环 */
+  publicOrigin?: string
 }
 
 /**
@@ -50,9 +62,27 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
 
   const runtimeDatabasePath = env.RUNTIME_SQLITE_PATH?.trim()
   const runtimeNotesDirectory = env.RUNTIME_NOTES_DIR?.trim()
+  const dataDirectory = env.WATERBOT_DATA_DIR?.trim()
+  const rawPublicOrigin = env.PUBLIC_ORIGIN?.trim()
+  let publicOrigin: string | undefined
+  if (rawPublicOrigin) {
+    let parsed: URL
+    try {
+      parsed = new URL(rawPublicOrigin)
+    } catch {
+      throw new Error('PUBLIC_ORIGIN 必须是 http:// 或 https:// 地址')
+    }
+    if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.username || parsed.password
+      || parsed.pathname !== '/' || parsed.search || parsed.hash) {
+      throw new Error('PUBLIC_ORIGIN 只能包含协议和主机')
+    }
+    publicOrigin = parsed.origin
+  }
   const runtimePaths = {
     ...(runtimeDatabasePath ? { runtimeDatabasePath } : {}),
     ...(runtimeNotesDirectory ? { runtimeNotesDirectory } : {}),
+    ...(dataDirectory ? { dataDirectory } : {}),
+    ...(publicOrigin ? { publicOrigin } : {}),
   }
 
   const rawPort = env.PORT?.trim()

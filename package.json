@@ -20,6 +20,8 @@
     "test:runtime": "npm run test:runtime --workspace @waterbot/server",
     "test:integration": "npm run test:integration --workspace @waterbot/server",
     "check": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run build",
+    "backup": "npm run backup --workspace @waterbot/server",
+    "restore": "npm run restore --workspace @waterbot/server",
     "pg:start": "npm run pg:start --workspace @waterbot/server",
     "pg:stop": "npm run pg:stop --workspace @waterbot/server",
     "pg:status": "npm run pg:status --workspace @waterbot/server",

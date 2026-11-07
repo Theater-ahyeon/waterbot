@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { loadQqConfig } from '../config'
-import { parseMessage, parseOwnerCommand, textMessage } from './onebot'
+import { attachmentSummary, parseMessage, parseOwnerCommand, parseRecall, textMessage } from './onebot'
 
 const BOT = '10001'
 const event = (overrides: Record<string, unknown>) => ({
@@ -15,7 +15,11 @@ describe('OneBot 解析', () => {
       { type: 'reply', data: { id: '77' } }, { type: 'at', data: { qq: '10001' } },
       { type: 'text', data: { text: ' 在吗 ' } }, { type: 'image', data: { file: 'a.png' } },
     ] }), BOT)
-    expect(parsed).toMatchObject({ kind: 'group', groupId: '30003', text: '在吗', mentionsBot: true, replyTo: '77', hasAttachment: true })
+    expect(parsed).toMatchObject({
+      kind: 'group', groupId: '30003', text: '在吗', mentionsBot: true, replyTo: '77',
+      hasAttachment: true, attachments: ['image'],
+    })
+    expect(attachmentSummary(parsed!.attachments)).toBe('[图片]')
   })
 
   it('字符串格式：拆 CQ 码并反转义，文本里的转义不算 @', () => {
@@ -26,6 +30,13 @@ describe('OneBot 解析', () => {
 
   it('@ 别人不算触发', () => {
     expect(parseMessage(event({ message: [{ type: 'at', data: { qq: '99999' } }] }), BOT)?.mentionsBot).toBe(false)
+  })
+
+  it('识别群撤回通知，不当作普通消息', () => {
+    expect(parseRecall({ post_type: 'notice', notice_type: 'group_recall', group_id: 30003, message_id: 5 }))
+      .toEqual({ groupId: '30003', messageId: '5' })
+    expect(parseRecall({ post_type: 'message', group_id: 30003, message_id: 5 })).toBeUndefined()
+    expect(parseRecall({ post_type: 'notice', notice_type: 'friend_recall', user_id: 20002, message_id: 5 })).toBeUndefined()
   })
 
   it('忽略别的账号、Bot 自己、元事件和临时会话', () => {
@@ -62,6 +73,8 @@ describe('出站与配置', () => {
     const base = { ONEBOT_WS_URL: 'ws://127.0.0.1:3001', QQ_BOT_ID: '1', QQ_OWNER_ID: '2' }
     expect(loadQqConfig(base)?.allowSend).toBe(false)
     expect(loadQqConfig({ ...base, QQ_ALLOW_SEND: '1' })?.allowSend).toBe(true)
+    expect(loadQqConfig({ ...base, QQ_DAILY_TOKEN_LIMIT: '1200' })?.dailyTokenLimit).toBe(1200)
+    expect(() => loadQqConfig({ ...base, QQ_DAILY_TOKEN_LIMIT: '-1' })).toThrow('非负整数')
     expect(() => loadQqConfig({ ...base, QQ_OWNER_ID: '1' })).toThrow('专用小号')
   })
 })

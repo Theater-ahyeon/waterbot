@@ -6,6 +6,10 @@ import { Button } from './components/ui/button'
 import { Card } from './components/ui/card'
 import { useHealth } from './hooks/useHealth'
 import { Activity } from './Activity'
+import { Automation } from './Automation'
+import { Library } from './Library'
+import { SettingsPanel, type SettingsValue } from './Settings'
+import { Tools } from './Tools'
 
 const field = 'w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50'
 const reason = (error: unknown) => error instanceof Error ? error.message : '发生错误，请重试'
@@ -56,9 +60,12 @@ function Conversation({ onLogout }: { onLogout: () => void }) {
   const [sending, setSending] = useState('')
   const [retry, setRetry] = useState(0)
   const [form, setForm] = useState<'create' | 'edit' | null>(null)
-  const [tab, setTab] = useState<'chat' | 'activity'>('chat')
+  const [tab, setTab] = useState<'chat' | 'activity' | 'automation' | 'library' | 'tools' | 'settings'>('chat')
+  const [settings, setSettings] = useState<SettingsValue>()
+  const [profileRevision, setProfileRevision] = useState(0)
   const pending = useRef(new Map<string, { text: string; nonce: string }>())
   const active = profiles.find((profile) => profile.id === activeId)
+  const timezone = settings?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone
   const current = view?.profile.id === activeId ? view : undefined
 
   useEffect(() => {
@@ -67,10 +74,26 @@ function Conversation({ onLogout }: { onLogout: () => void }) {
       if (controller.signal.aborted) return
       if (!Array.isArray(result.profiles)) throw new Error('人格列表无效')
       setProfiles(result.profiles)
-      setActiveId((previous) => previous || result.profiles[0]?.id || '')
+      setActiveId((previous) => result.profiles.some((profile) => profile.id === previous) ? previous : result.profiles[0]?.id ?? '')
     }).catch((error: unknown) => { if (!controller.signal.aborted) setError(reason(error)) })
     return () => controller.abort()
+  }, [profileRevision])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void api<SettingsValue>('/api/settings', 'GET', undefined, controller.signal)
+      .then((value) => { if (!controller.signal.aborted) setSettings(value) })
+      .catch(() => undefined)
+    return () => controller.abort()
   }, [])
+
+  useEffect(() => {
+    const root = document.documentElement
+    if (!settings) return
+    if (settings.theme === 'system') delete root.dataset.theme
+    else root.dataset.theme = settings.theme
+    root.dataset.density = settings.density
+  }, [settings])
 
   useEffect(() => {
     if (!activeId) return
@@ -119,7 +142,14 @@ function Conversation({ onLogout }: { onLogout: () => void }) {
       <div><p className="mb-1 text-xs text-muted-foreground">你的个人工作台</p><h1 className="text-2xl font-semibold tracking-tight">Waterbot</h1></div>
       <div className="flex flex-wrap items-center gap-3"><Badge tone="neutral">本地演示模型</Badge><Button variant="outline" onClick={onLogout} className="min-h-11">退出登录</Button></div>
     </header>
-    <nav aria-label="工作台功能" className="mb-5 flex gap-2"><Button variant={tab === 'chat' ? 'default' : 'outline'} aria-pressed={tab === 'chat'} onClick={() => setTab('chat')} className="min-h-11">对话</Button><Button variant={tab === 'activity' ? 'default' : 'outline'} aria-pressed={tab === 'activity'} onClick={() => setTab('activity')} className="min-h-11">活动与审批</Button></nav>
+    <nav aria-label="工作台功能" className="mb-5 flex flex-wrap gap-2">
+      <Button variant={tab === 'chat' ? 'default' : 'outline'} aria-pressed={tab === 'chat'} onClick={() => setTab('chat')} className="min-h-11">对话</Button>
+      <Button variant={tab === 'activity' ? 'default' : 'outline'} aria-pressed={tab === 'activity'} onClick={() => setTab('activity')} className="min-h-11">活动与审批</Button>
+      <Button variant={tab === 'automation' ? 'default' : 'outline'} aria-pressed={tab === 'automation'} onClick={() => setTab('automation')} className="min-h-11">例行任务</Button>
+      <Button variant={tab === 'library' ? 'default' : 'outline'} aria-pressed={tab === 'library'} onClick={() => setTab('library')} className="min-h-11">资料库</Button>
+      <Button variant={tab === 'tools' ? 'default' : 'outline'} aria-pressed={tab === 'tools'} onClick={() => setTab('tools')} className="min-h-11">工具与执行</Button>
+      <Button variant={tab === 'settings' ? 'default' : 'outline'} aria-pressed={tab === 'settings'} onClick={() => setTab('settings')} className="min-h-11">设置与组织</Button>
+    </nav>
     <div className="grid min-w-0 gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
       <aside className="min-w-0 space-y-4">
         <Card className="p-4">
@@ -134,8 +164,13 @@ function Conversation({ onLogout }: { onLogout: () => void }) {
         </Card>
         <p className="px-1 text-xs leading-relaxed text-muted-foreground">每个人格拥有独立的对话。记忆共享功能将在后续加入。</p>
       </aside>
-      <section className="min-w-0 space-y-4" aria-label="当前对话">
-        {tab === 'activity' && active ? <Activity key={activeId} profile={active} /> : <>
+      <section className="min-w-0 space-y-4" aria-label="工作台内容">
+        {tab === 'activity' && (active ? <Activity key={activeId} profile={active} /> : <p className="text-sm text-muted-foreground">请先选择一个人格。</p>)}
+        {tab === 'automation' && (active ? <Automation key={activeId} profile={active} timezone={timezone} /> : <p className="text-sm text-muted-foreground">请先选择一个人格。</p>)}
+        {tab === 'library' && (active ? <Library key={activeId} profile={active} /> : <p className="text-sm text-muted-foreground">请先选择一个人格。</p>)}
+        {tab === 'tools' && (active ? <Tools key={activeId} profile={active} /> : <p className="text-sm text-muted-foreground">请先选择一个人格。</p>)}
+        {tab === 'settings' && <SettingsPanel active={active} settings={settings} onSettings={setSettings} onProfiles={() => setProfileRevision((value) => value + 1)} />}
+        {tab === 'chat' && <>
         {form && <ProfileForm key={form === 'edit' ? activeId : 'new'} profile={form === 'edit' ? active : undefined} onSave={saved} onCancel={() => setForm(null)} />}
         <Card className="flex min-h-[520px] min-w-0 flex-col">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b p-5">

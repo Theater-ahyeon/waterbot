@@ -3,6 +3,7 @@ export interface Profile {
   name: string
   instructions: string
   revision: number
+  archived_at?: string | null
 }
 
 export interface ChatSnapshot {

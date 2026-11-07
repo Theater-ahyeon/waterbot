@@ -16,11 +16,30 @@ import { QQ_SEND, QqBridge } from './qq/bridge'
 import { GroupArchive } from './archive'
 import { createBingSearcher, createTavilySearcher, createWebSearchTool, DEFAULT_DAILY_LIMIT } from './search'
 import { Memories } from './memory'
+import { MemoryExtractor } from './memory-extraction'
+import { Usage } from './usage'
+import { Status } from './status'
 import { createContextExtension } from './memory-context'
+import { BotCollaboration, createBotMessageTool } from './collaboration'
+import { createMcpTool, McpService } from './mcp'
+import { Skills } from './skills'
+import { Routines } from './routines'
+import { Documents } from './documents'
+import { BrowserService, createBrowserTools } from './browser'
+import { createGithubTools, GithubService } from './github'
+import { createConnectorTools, createConnectors } from './connectors'
+import { VoiceService } from './voice'
+import { createPageTool, Pages } from './pages'
+import { Settings } from './settings'
+import { WorkbenchSearch } from './workbench-search'
+import { QzoneService } from './qzone'
+import { ExecutionService } from './execution'
 import {
   createEchoTool,
   createFileNoteTool,
+  createRemoteModels,
   FAUX_MODEL,
+  loadRemoteModelConfig,
   openRuntime,
   type AgentRuntime,
 } from './runtime'
@@ -28,13 +47,24 @@ import {
 const envFile = loadProjectEnvFile()
 const config = loadConfig(process.env)
 const qqConfig = loadQqConfig(process.env)
+const remoteModel = loadRemoteModelConfig(process.env)
+const remote = remoteModel ? createRemoteModels(remoteModel) : undefined
+const runtimeModel = remote?.model ?? FAUX_MODEL
+const runtimeModelRoute = `${runtimeModel.provider}/${runtimeModel.modelId}`
 
+const dataDirectory = config.dataDirectory
+  ? resolve(PROJECT_ROOT, config.dataDirectory)
+  : resolve(PROJECT_ROOT, 'apps/server/data')
 const databasePath =
   config.runtimeDatabasePath ??
-  resolve(PROJECT_ROOT, 'apps/server/data/runtime.sqlite')
+  resolve(dataDirectory, 'runtime.sqlite')
 const notesDirectory =
   config.runtimeNotesDirectory ??
-  resolve(PROJECT_ROOT, 'apps/server/data/notes')
+  resolve(dataDirectory, 'notes')
+const documentsDirectory = resolve(dataDirectory, 'documents')
+const browserProfilesDirectory = resolve(dataDirectory, 'browser-profiles')
+const browserShotsDirectory = resolve(dataDirectory, 'browser-shots')
+const voiceDirectory = resolve(dataDirectory, 'voice')
 
 // 产品业务库：连不上就不带病启动。业务表由 npm run db:migrate 建。
 const database = await resolveDatabaseConfig()
@@ -69,13 +99,45 @@ const searcher = tavilyKey ? createTavilySearcher(tavilyKey) : createBingSearche
 const searchTools = process.env.SEARCH_DISABLED?.trim() === '1' ? [] : [createWebSearchTool(pool, searcher, searchLimit)]
 const archive = new GroupArchive(pool)
 const memories = new Memories(pool, archive)
+const usage = new Usage(pool)
+const mcpService = new McpService(pool)
+await mcpService.start()
+const mcpTool = createMcpTool(() => mcpService)
+const skills = new Skills(pool)
+const pages = new Pages(pool)
+const browser = new BrowserService(pool, browserProfilesDirectory, browserShotsDirectory, {
+  channel: process.env.BROWSER_CHANNEL?.trim() || 'msedge',
+})
+const github = new GithubService({
+  ...(process.env.GITHUB_TOKEN?.trim() ? { token: process.env.GITHUB_TOKEN.trim() } : {}),
+  ...(process.env.GITHUB_API_BASE?.trim() ? { baseUrl: process.env.GITHUB_API_BASE.trim() } : {}),
+})
+const connectors = createConnectors(process.env)
+const voiceKey = process.env.VOICE_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim()
+const voice = new VoiceService(pool, voiceDirectory, {
+  ...(process.env.VOICE_STT_URL?.trim() ? { sttUrl: process.env.VOICE_STT_URL.trim() } : {}),
+  ...(process.env.VOICE_STT_MODEL?.trim() ? { sttModel: process.env.VOICE_STT_MODEL.trim() } : {}),
+  ...(process.env.VOICE_TTS_URL?.trim() ? { ttsUrl: process.env.VOICE_TTS_URL.trim() } : {}),
+  ...(process.env.VOICE_TTS_MODEL?.trim() ? { ttsModel: process.env.VOICE_TTS_MODEL.trim() } : {}),
+  ...(process.env.VOICE_TTS_VOICE?.trim() ? { ttsVoice: process.env.VOICE_TTS_VOICE.trim() } : {}),
+  ...(voiceKey ? { apiKey: voiceKey } : {}),
+})
+const extractor = qqConfig && remote
+  ? new MemoryExtractor(pool, archive, memories, remote.models, remote.modelInfo, qqConfig.dailyTokenLimit)
+  : undefined
+if (extractor) await extractor.start()
+const collaborationRef: { current?: BotCollaboration } = {}
+const botTool = createBotMessageTool(() => collaborationRef.current)
 let runtime: AgentRuntime
 try {
   runtime = await openRuntime({
     databasePath,
     tools: [createEchoTool(), createFileNoteTool({ directory: notesDirectory })],
-    demo: true,
-    extensions: [createContextExtension(memories, `${FAUX_MODEL.provider}/${FAUX_MODEL.modelId}`, archive, searchTools)],
+    demo: !remote,
+    ...(remote ? { models: remote.models, model: remote.model } : {}),
+    extensions: [createContextExtension(memories, runtimeModelRoute, archive, [
+      ...searchTools, botTool, mcpTool, createPageTool(pages), ...createBrowserTools(browser), ...createGithubTools(github), createConnectorTools(connectors),
+    ])],
     onReport: (error, info) => {
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[server] runtime report ${info.type}: ${message}`)
@@ -99,22 +161,60 @@ void runtime.harness
     console.error('[server] runtime 恢复等待失败:', error)
   })
 
-const auth = await OwnerAuth.open(pool, resolve(dirname(databasePath), 'owner-key'))
-const profiles = new Profiles(pool, runtime)
+const auth = await OwnerAuth.open(pool, resolve(dirname(databasePath), 'owner-key'), {
+  secure: config.publicOrigin?.startsWith('https://') ?? false,
+})
+const profiles = new Profiles(pool, runtime, skills)
 await profiles.seed()
+collaborationRef.current = new BotCollaboration(pool, runtime, profiles)
+collaborationRef.current.start()
 const chats = new Chats(pool, runtime, profiles)
 chats.start()
 let qq: QqBridge | undefined
+let qzoneService: QzoneService | undefined
 const actions = new Actions(pool, (action) => {
+  if (action.kind === 'qzone.comment') {
+    if (!qzoneService) return Promise.reject(new Error('QQ 空间未启用'))
+    return qzoneService.comment(action)
+  }
+  if (connectors.supports(action.account_id)) return connectors.deliver(action)
   if (action.kind !== QQ_SEND) return simulatedSend(action)
   if (!qq) return Promise.reject(new Error('QQ 未启用'))
   return qq.deliver(action)
 })
-if (qqConfig) qq = new QqBridge(pool, runtime, profiles, actions, archive, memories, qqConfig)
+if (qqConfig) qq = new QqBridge(pool, runtime, profiles, actions, archive, memories, qqConfig, extractor)
+const activeQq = qq
+if (activeQq && qqConfig) {
+  const allowWrite = process.env.QZONE_ALLOW_WRITE?.trim() === '1'
+  qzoneService = new QzoneService(pool, activeQq.account, qqConfig.botId, (action, params) => activeQq.call(action, params), allowWrite)
+}
 await actions.start()
 qq?.start()
 if (qqConfig) console.log(`[server] qq enabled: allowSend=${qqConfig.allowSend}`)
-const server = createApp({ services: { auth, profiles, chats, actions, memories, ...(qq ? { qq } : {}) } })
+const execution = new ExecutionService(
+  pool,
+  resolve(dataDirectory, 'workspaces'),
+  resolve(PROJECT_ROOT, 'apps/server/src/execution-worker.mjs'),
+  [documentsDirectory, browserShotsDirectory, voiceDirectory],
+)
+const documents = new Documents(pool, documentsDirectory)
+const settings = new Settings(pool)
+const search = new WorkbenchSearch(pool)
+await execution.start()
+const routines = new Routines(pool, profiles, runtime, qqConfig
+  ? { qq: { account: `onebot:${qqConfig.botId}`, ownerId: qqConfig.ownerId, allowSend: qqConfig.allowSend } }
+  : {})
+routines.start()
+const status = new Status(pool, runtime, usage, extractor, qq)
+const server = createApp({
+  ...(config.publicOrigin ? { publicOrigin: config.publicOrigin } : {}),
+  services: {
+    auth, profiles, chats, actions, memories, usage, status, execution, mcp: mcpService, skills, routines,
+    documents, pages, settings, search, browser, github, connectors, voice,
+    collaboration: collaborationRef.current,
+    ...(qzoneService ? { qzone: qzoneService } : {}), ...(qq ? { qq } : {}),
+  },
+})
 
 let failing = false
 
@@ -135,6 +235,12 @@ async function failStart(error: NodeJS.ErrnoException): Promise<void> {
   // 已经打开的 Harness / SQLite / PG 连接必须关掉，否则进程带着句柄退出、库文件被占用。
   try {
     await qq?.close()
+    await extractor?.close()
+    await collaborationRef.current?.close()
+    await routines.close()
+    await browser.close()
+    await execution.close()
+    await mcpService.close()
     await chats.close()
     await actions.close()
     await runtime.close()
@@ -184,6 +290,12 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
 
   try {
     await qq?.close()
+    await extractor?.close()
+    await collaborationRef.current?.close()
+    await routines.close()
+    await browser.close()
+    await execution.close()
+    await mcpService.close()
     await chats.close()
     await actions.close()
     await runtime.close()
@@ -203,3 +315,5 @@ process.on('SIGINT', (signal) => {
 process.on('SIGTERM', (signal) => {
   void shutdown(signal)
 })
+
+

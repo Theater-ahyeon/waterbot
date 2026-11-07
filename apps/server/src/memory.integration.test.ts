@@ -178,13 +178,24 @@ describe('记忆权威层（真实 PG / Pi / HTTP）', () => {
 
   it('忘记后停止召回和列出，记录留给主人核对，不能再改回来', async () => {
     const memory = await remember(profile.id, 'FORGET-CANARY 主人的旧习惯是夜跑')
+    const epoch = (await db.pool.query<{ epoch: number }>('select epoch from owner_context where id = 1')).rows[0]!.epoch
     const forget = await request(`/api/memories/${memory.id}/forget`, 'POST', { expectedVersion: 1 })
     expect(forget.status).toBe(200)
+    expect((await db.pool.query<{ epoch: number }>('select epoch from owner_context where id = 1')).rows[0]!.epoch).toBe(epoch + 1)
     expect(await ask(profile.id, '我的旧习惯是夜跑吗')).not.toContain('FORGET-CANARY')
     const { memories: listed } = await (await request(`/api/profiles/${profile.id}/memories`)).json() as { memories: Memory[] }
     expect(listed).toEqual([])
     expect((await (await request(`/api/memories/${memory.id}`)).json() as { memory: Memory }).memory.state).toBe('archived')
     expect((await request(`/api/memories/${memory.id}/revisions`, 'POST', { clientRequestId: nextId(), expectedVersion: 1, content: '改回来' })).status).toBe(409)
+  })
+
+  it('物理清除只删记忆与来源，并明确 Pi 历史不在范围', async () => {
+    const memory = await remember(profile.id, 'PURGE-CANARY 主人的临时安排')
+    const purged = await request(`/api/memories/${memory.id}/purge`, 'POST', {})
+    expect(purged.status).toBe(200)
+    expect(await purged.json()).toMatchObject({ memory: true, versions: 1, sources: 1, note: expect.stringContaining('Pi') })
+    expect((await request(`/api/memories/${memory.id}`)).status).toBe(404)
+    expect((await db.pool.query('select count(*)::int as n from memory_source where id = $1', [memory.source_id])).rows[0].n).toBe(0)
   })
 
   it('人格之间互不可见', async () => {

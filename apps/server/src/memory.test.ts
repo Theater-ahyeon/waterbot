@@ -8,7 +8,8 @@ import { createContextExtension, MEMORY_UNAVAILABLE } from './memory-context'
 function memory(overrides: Partial<Memory>): Memory {
   return {
     id: 'm', profile_id: 'p', scope_kind: 'owner_private', scope_ref: '', kind: 'fact', subject: '', state: 'active', version: 1,
-    content: '', epistemic_status: 'owner_stated', source_id: 's', source_actor: 'owner', occurred_at: new Date(0), recorded_at: new Date(0),
+    content: '', epistemic_status: 'owner_stated', source_id: 's', source_kind: 'owner_statement', source_actor: 'owner', message_id: null,
+    occurred_at: new Date(0), recorded_at: new Date(0),
     ...overrides,
   }
 }

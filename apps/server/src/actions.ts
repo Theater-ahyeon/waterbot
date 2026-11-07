@@ -13,7 +13,7 @@ export interface Action {
   account_id: string
   kind: string
   target_ref: string
-  payload: { message: string }
+  payload: { message: string; [key: string]: unknown }
   payload_hash: string
   semantic_key: string
   profile_revision: number
@@ -51,8 +51,19 @@ export class Actions {
   async start(): Promise<void> {
     // sending 没有确认回执时，重启不能把它当成尚未发送。
     await this.pool.query(`update action set status = 'unknown', reason = '进程中断，结果待核对', updated_at = now() where status = 'sending'`)
+    await this.expireStale()
     this.timer = setInterval(() => { void this.pump() }, 500)
     void this.pump()
+  }
+
+  /** 待审和执行都受同一个 expires_at 约束；过期后列表不再显示为可用。 */
+  async expireStale(): Promise<number> {
+    return (await this.pool.query(
+      `update action set status = 'expired',
+              reason = case when status = 'ready' then '执行前授权已过期' else '等待审批的时间已过' end,
+              updated_at = now()
+        where status in ('ready', 'awaiting_approval') and expires_at < clock_timestamp()`,
+    )).rowCount ?? 0
   }
 
   async close(): Promise<void> {
@@ -115,9 +126,16 @@ export class Actions {
   }
 
   /** 内部入口：账号与动作类型由调用方的受信代码决定，不来自请求体。 */
-  async submit(profileId: string, input: { account: string; kind: string; target: string; message: string; trigger: string }): Promise<Action> {
+  async submit(profileId: string, input: {
+    account: string
+    kind: string
+    target: string
+    message: string
+    trigger: string
+    payload?: Record<string, unknown>
+  }): Promise<Action> {
     const { account, kind, target, message, trigger } = input
-    const payload = { message }
+    const payload = { message, ...input.payload }
     const fingerprint = hash({ account, kind, target, payload })
     const semantic = hash({ account, kind, target, trigger })
     return withTransaction(this.pool, async (client) => {
@@ -132,7 +150,8 @@ export class Actions {
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,clock_timestamp()+interval '15 minutes')
          on conflict(semantic_key) do nothing returning *`,
         [randomUUID(), profileId, account, kind, target, JSON.stringify(payload), fingerprint, semantic, context.revision, context.epoch,
-          policy?.id ?? null, policy?.revision ?? null, policy ? 'ready' : 'awaiting_approval', policy ? '在已授权的模拟范围内' : '需要主人确认'],
+          policy?.id ?? null, policy?.revision ?? null, policy ? 'ready' : 'awaiting_approval',
+          policy ? (kind === KIND ? '在已授权的模拟范围内' : '在已授权范围内') : '需要主人确认'],
       )
       const action = inserted.rows[0]
       if (!action) {
@@ -153,6 +172,11 @@ export class Actions {
 
   async decide(id: string, body: Record<string, unknown>): Promise<Action> {
     if (body.decision !== 'approved' && body.decision !== 'rejected') throw new HttpError(400, '决定无效')
+    const stale = await this.pool.query(
+      `update action set status = 'expired', reason = '等待审批的时间已过', updated_at = now()
+        where id = $1 and status = 'awaiting_approval' and expires_at < clock_timestamp() returning id`, [id],
+    )
+    if (stale.rowCount) throw new HttpError(409, '动作已过期，请重新发起')
     return withTransaction(this.pool, async (client) => {
       const action = await this.locked(client, id)
       if (action.status !== 'awaiting_approval' || body.revision !== action.revision || body.payloadHash !== action.payload_hash) throw new HttpError(409, '动作或内容已变化，请刷新后审查')
@@ -222,6 +246,7 @@ export class Actions {
   private pump(): Promise<void> {
     if (this.closed) return Promise.resolve()
     if (!this.running) this.running = (async () => {
+      await this.expireStale()
       const ready = (await this.pool.query<{ id: string }>(`select id from action where status='ready' order by created_at limit 20`)).rows
       for (const action of ready) { if (this.closed) break; await this.execute(action.id) }
     })().catch(() => { console.error('[action] 动作处理暂时失败') }).finally(() => { this.running = undefined })

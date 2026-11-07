@@ -1,0 +1,26 @@
+[Unit]
+Description=Waterbot personal agent
+Documentation=file:/opt/waterbot/README.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=waterbot
+Group=waterbot
+WorkingDirectory=/opt/waterbot
+EnvironmentFile=/etc/waterbot.env
+ExecStart=/usr/bin/node apps/server/dist/index.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/waterbot
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

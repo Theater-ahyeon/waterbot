@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 
-import type { Pool } from '../pg/connection'
+import type { Pool, PoolClient } from '../pg/connection'
 import { withTransaction } from '../pg/connection'
 
 export interface InboundEventRow {
@@ -89,63 +89,72 @@ export async function ingestInboundEvent(
   pool: Pool,
   input: IngestInput,
 ): Promise<IngestResult> {
+  return withTransaction(pool, (client) => ingestInboundEventWithClient(client, input))
+}
+
+/**
+ * 供已经持有事务的调用方组合使用：例行任务的 occurrence 与 outbox
+ * 必须在同一个事务里写入，避免出现“记了运行但没有派发”。
+ */
+export async function ingestInboundEventWithClient(
+  client: PoolClient,
+  input: IngestInput,
+): Promise<IngestResult> {
   const hash = payloadHashOf(input.payload)
 
-  return withTransaction(pool, async (client) => {
-    const eventId = input.eventId ?? idFrom('evt', `${input.source}\u0000${input.externalId}`)
-    const outboxId =
-      input.outboxId ?? idFrom('out', `${input.source}\u0000${input.externalId}\u0000${input.conversationKey}`)
+  const eventId = input.eventId ?? idFrom('evt', `${input.source}\u0000${input.externalId}`)
+  const outboxId =
+    input.outboxId ?? idFrom('out', `${input.source}\u0000${input.externalId}\u0000${input.conversationKey}`)
 
-    const inserted = await client.query<InboundEventRow>(
-      `insert into inbound_event (id, source, external_id, payload, payload_hash)
-       values ($1, $2, $3, $4, $5)
-       on conflict (source, external_id) do nothing
-       returning *`,
-      [eventId, input.source, input.externalId, JSON.stringify(input.payload ?? null), hash],
-    )
+  const inserted = await client.query<InboundEventRow>(
+    `insert into inbound_event (id, source, external_id, payload, payload_hash)
+     values ($1, $2, $3, $4, $5)
+     on conflict (source, external_id) do nothing
+     returning *`,
+    [eventId, input.source, input.externalId, JSON.stringify(input.payload ?? null), hash],
+  )
 
-    if (inserted.rowCount === 1) {
-      const event = inserted.rows[0] as InboundEventRow
-      const outbox = await client.query<OutboxRow>(
-        `insert into dispatch_outbox (id, inbound_event_id, conversation_key, request_id)
-         values ($1, $2, $3, $4)
-         returning *`,
-        [outboxId, event.id, input.conversationKey, stableRequestId(input.source, input.externalId, input.conversationKey)],
-      )
-
-      return { event, outbox: outbox.rows[0] as OutboxRow, created: true }
-    }
-
-    const existing = await client.query<InboundEventRow>(
-      'select * from inbound_event where source = $1 and external_id = $2',
-      [input.source, input.externalId],
-    )
-    const event = existing.rows[0]
-    if (!event) {
-      throw new Error('唯一约束冲突但读不到原事件')
-    }
-
-    if (event.payload_hash !== hash) {
-      throw new PayloadConflictError(input.source, input.externalId)
-    }
-
-    const outboxExisting = await client.query<OutboxRow>(
-      'select * from dispatch_outbox where inbound_event_id = $1 and conversation_key = $2',
-      [event.id, input.conversationKey],
-    )
-
-    if (outboxExisting.rows[0]) {
-      return { event, outbox: outboxExisting.rows[0], created: false }
-    }
-
-    // 同一事件投向另一个会话：新增一条 outbox，但复用同一个事件记录
-    const createdOutbox = await client.query<OutboxRow>(
+  if (inserted.rowCount === 1) {
+    const event = inserted.rows[0] as InboundEventRow
+    const outbox = await client.query<OutboxRow>(
       `insert into dispatch_outbox (id, inbound_event_id, conversation_key, request_id)
        values ($1, $2, $3, $4)
        returning *`,
       [outboxId, event.id, input.conversationKey, stableRequestId(input.source, input.externalId, input.conversationKey)],
     )
 
-    return { event, outbox: createdOutbox.rows[0] as OutboxRow, created: false }
-  })
+    return { event, outbox: outbox.rows[0] as OutboxRow, created: true }
+  }
+
+  const existing = await client.query<InboundEventRow>(
+    'select * from inbound_event where source = $1 and external_id = $2',
+    [input.source, input.externalId],
+  )
+  const event = existing.rows[0]
+  if (!event) {
+    throw new Error('唯一约束冲突但读不到原事件')
+  }
+
+  if (event.payload_hash !== hash) {
+    throw new PayloadConflictError(input.source, input.externalId)
+  }
+
+  const outboxExisting = await client.query<OutboxRow>(
+    'select * from dispatch_outbox where inbound_event_id = $1 and conversation_key = $2',
+    [event.id, input.conversationKey],
+  )
+
+  if (outboxExisting.rows[0]) {
+    return { event, outbox: outboxExisting.rows[0], created: false }
+  }
+
+  // 同一事件投向另一个会话：新增一条 outbox，但复用同一个事件记录
+  const createdOutbox = await client.query<OutboxRow>(
+    `insert into dispatch_outbox (id, inbound_event_id, conversation_key, request_id)
+     values ($1, $2, $3, $4)
+     returning *`,
+    [outboxId, event.id, input.conversationKey, stableRequestId(input.source, input.externalId, input.conversationKey)],
+  )
+
+  return { event, outbox: createdOutbox.rows[0] as OutboxRow, created: false }
 }

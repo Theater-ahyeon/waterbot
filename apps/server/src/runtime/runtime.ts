@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
+import type { Models } from '@earendil-works/pi-ai'
 import type { FauxResponseStep } from '@earendil-works/pi-ai/providers/faux'
 import {
   createRegistry,
@@ -51,6 +52,8 @@ export interface RuntimeOptions {
   demo?: boolean
   /** 默认 faux，不需要任何平台凭据 */
   model?: ModelRef
+  /** 真实模型集合；未提供时只注册 faux provider */
+  models?: Models
   /** 这个 runtime 绑定的业务会话键；一个 runtime 只服务一个目标 */
   conversationKey?: string
   /** 业务扩展：注册到运行库，由每个业务会话显式选择 */
@@ -100,7 +103,8 @@ export async function openRuntime(options: RuntimeOptions): Promise<AgentRuntime
   }
   await mkdir(dirname(options.databasePath), { recursive: true })
 
-  const { models } = createFauxModels(options.responses)
+  const { models: fauxModels } = createFauxModels(options.responses)
+  const models = options.models ?? fauxModels
   const registry = createRegistry()
   registry.install(
     defineExtension({ name: EXTENSION_NAME, tools: [...options.tools] }),
@@ -117,6 +121,7 @@ export async function openRuntime(options: RuntimeOptions): Promise<AgentRuntime
       {
         models: options.demo ? createDemoModels : models,
         registry,
+        settings: { stream: { timeoutMs: 180_000, maxRetries: 0 } },
         ...(options.onReport ? { onReport: options.onReport } : {}),
       },
       BACKGROUND_CONTEXT,

@@ -1,6 +1,508 @@
 # 当前状态与续接
 
-## R11：P1-03 精简版完成（2026-11-01，当前权威状态）
+## R29：P3-04 / P3-05 / P3-09 连接器与语音留言（2026-11-06，当前权威状态）
+
+本节优先于 R28 及更早记录。供应商连接器和语音只用本地夹具验收；用户明确本轮不要求真实账号验证。
+
+交付：
+
+- `src/connectors/`：Notion（搜索 / 页面 / 追加段落）、Slack（频道 / 消息 / 发消息）、X（只读搜索 / 用户时间线）、B站（WBI 搜索 / 视频 / 评论 / 评论动作）、CalDAV（事件读取 / 创建）、邮箱（IMAP 收件箱 / 邮件读取、SMTP 发送）。
+- 读写统一注册表：`GET /api/connectors`、`POST /api/connectors/:provider/read`、`POST /api/connectors/:provider/actions`。
+- 所有供应商写入先生成 Action，经过审批或已授权规则后由 `Connectors.deliver` 调用上游；未配置或未授权时明确失败。
+- `connector_read` 工具只在主人私聊注入；凭据只来自环境变量，不返回、不写入模型上下文。
+- `src/voice.ts`：OpenAI 兼容的语音转写和合成；`POST /voice/transcribe` 接收原始音频，`POST /voice/speak` 写入 audio artifact；未配置时明确返回 503。
+- 工作台「工具与执行」增加连接器状态、通用读取 / 写动作表单、语音合成和音频转写。
+- `.env.example` 增加 Notion、Slack、X、B站、CalDAV、IMAP / SMTP、语音端点配置。
+
+验证：
+
+- `connectors.test.ts` 7 个测试：Notion 读取 / 追加、Slack 读取 / 发送、X 只读、B站 WBI 签名 / 视频 / 评论 / 评论动作、日历 ICS 重新解析、邮箱配置与收件人校验、注册表。
+- `connectors.integration.test.ts` 3 个测试：真实 PG / HTTP，读取连接器、提交写动作、审批后真实调用本地上游、转写和合成接口。
+- `voice.integration.test.ts` 3 个测试：转写、合成产物下载、未配置和音频大小上限。
+- `npm run check` 退出 0：server unit 77、web unit 23、集成 112、build 成功，共 212 个测试。
+
+未验证 / 已知限制：
+
+- Notion / Slack / X / B站 / CalDAV / 邮箱都没有真实账号、真实 OAuth 或真实平台写入验收；只用本地夹具。
+- X 只有 Read Bearer，没有发帖凭据；没有 OAuth 1.0a / OAuth2 用户授权。
+- B站 WBI 算法按公开资料实现，没有真实 Cookie 验收；Cookie 过期、风控和验证码没有处理。
+- CalDAV 只测了 ICS 生成 / 重新解析；没有真实 DAV 服务器；邮箱没有真实 IMAP / SMTP 连接。
+- 语音只有留言式转写 / 合成；没有实时通话、打断、手机原生录音、推送通知或系统分享桥。
+- 写入动作仍要求审批或长期规则；没有自动学习何时该发。
+
+下一步：
+
+1. P4-01 全功能回归：逐项核对代码位置、自动化证据和未通过项。
+2. P4-02 等部署授权后执行目标主机、恢复对账和用户验收。
+3. 真实账号、音频设备和手机桥接就绪后，对连接器 / 语音做平台验收，不把夹具结果写成真实完成。
+
+## R28：P3-04 GitHub 只读连接器（2026-11-06）
+
+本节优先于 R27 及更早记录。只接了一个供应商的只读操作集合，没有写操作。
+
+交付：
+
+- `src/github.ts`：`GithubService` 读取仓库元数据、issue / pull request；zod 校验上游响应；15 秒超时；错误转成 502。
+- API：`GET /api/connectors/github/status`、`/repos/:owner/:repo`、`/repos/:owner/:repo/issues`。
+- 工具 `github_read_repo`、`github_list_issues` 只在主人私聊注入。
+- `GITHUB_TOKEN` 可选；公共仓库不需要。`GITHUB_API_BASE` 支持 GitHub Enterprise 和测试夹具；token 不出现在响应、日志或模型上下文。
+
+验证：
+
+- 新增 `github.test.ts` 3 个测试：本地夹具读取仓库、issue 和 pull request 区分、Authorization 头；非法仓库名和上游 500 失败路径。
+- 真实公共 API 冒烟：`octocat/Hello-World` 返回 3905 stars、默认分支 `master`，开放 issue 50 条，耗时约 3.1 秒。
+- `npm run check` 退出 0：server unit 70、web unit 23、集成 106、build 成功，共 199 个测试。
+
+未验证 / 已知限制：
+
+- 只有公共读取；没有评论、创建 issue、合并、推送或任何写操作。
+- 私有仓库 token 路径没有用真实私有仓库验收；没有 OAuth 安装流程和多账号。
+- 没有分页、搜索、速率限制缓存或 ETag；GitHub 限流时直接返回明确失败。
+- 其他具名供应商（邮箱、日历、Notion、Slack、X）仍未接入。
+- 连接器没有进入工作台界面，只有 API 和主人私聊工具。
+
+下一步：
+
+1. P4-01 全功能回归，逐项核对证据和未通过项。
+2. P4-02 等部署授权后执行目标主机、恢复对账和用户验收。
+3. 其余供应商、B 站、语音 / 手机在账号或设备就绪后逐项接入。
+
+## R27：P3-02 浏览器工作面与 P4-02 部署准备（2026-11-06）
+
+本节优先于 R26 及更早记录。浏览器已接真实 Edge；部署配置只准备、未执行。
+
+交付：
+
+- `migrations/0021_browser.sql`：`browser_surface`，记录状态、控制者、租约版本、当前 URL 和错误。
+- `src/browser.ts`：Playwright Core 1.65 + 宿主 Edge 的独立持久 profile；ARIA 快照、可操作元素 ref、点击、输入、整页截图、人工接管租约；默认拒绝本机和私有网段。
+- 浏览器工具 `browser_open` / `snapshot` / `click` / `type` / `screenshot` 只在主人私聊注入。
+- API：`GET /api/profiles/:id/browser`、`/snapshot`，`POST open|click|type|screenshot|close|lease`。
+- 工作台「工具与执行」增加浏览器打开、快照、元素点击、输入、截图、接管和关闭。
+- `src/config.ts` + `src/http.ts` + `src/auth.ts`：`PUBLIC_ORIGIN` 允许同机反向代理的 Host / Origin；HTTPS 时会话 cookie 加 Secure；server 仍只监听回环。`WATERBOT_DATA_DIR` 统一运行数据根目录。
+- `deploy/waterbot.service`、`deploy/nginx.conf`、`deploy/README.md`：systemd、HTTPS 反向代理、迁移 / 备份检查单；未在目标主机执行。
+
+验证：
+
+- 新增 `browser.integration.test.ts` 4 个测试：真实 Edge 打开本机测试页、ARIA 快照、点击、输入、截图产物；两个 profile 的 cookie 隔离；人工接管阻止 agent；默认拒绝本机和私有网段。
+- 新增 `http.test.ts` 4 个测试：本机 Host、配置后的公网 Host、非法 Host、PUBLIC_ORIGIN 格式和数据目录。
+- `npm run check` 退出 0：server unit 62、web unit 23、集成 106、build 成功。
+
+未验证 / 已知限制：
+
+- 只验证了 Windows 上的 Edge；没有验证 Linux Chrome、无头桌面、原生鼠标键盘、本机设备桥或硬件密钥。
+- 只做 ARIA 快照和元素引用，没有截图驱动的坐标点击、下载处理、多 tab 管理或实时人工画面。
+- 没有密码字段暂停或秘密输入面板：`browser_type` 的文本会经过模型和工具参数，不要把密码、验证码或令牌交给它；快照不回显输入值不等于秘密不会进入上下文。
+- SSRF 只按 URL 主机名拒绝本机和私有网段；没有校验 DNS 解析结果和重定向后的地址。
+- 人工接管只有 API / 租约，没有实时画面输入通道；接管期间 agent 工具会拒绝。
+- 部署文件没有在 Linux、正式 PostgreSQL、证书或 systemd 上执行；P4-02 仍等待部署授权和用户验收。
+- P3-04 具名应用连接器、P3-05 B 站、P3-09 语音 / 手机 / 通知仍未开始，真实验收需要账号、设备或宿主。
+
+下一步：
+
+1. P4-01 全功能回归：逐项核对 P / U 项、真实产物、权限与中断，记录未通过项。
+2. P4-02 只有在获得部署授权后才执行目标主机配置、恢复对账和用户验收。
+3. P3-04 / 05 / 09 在账号或设备就绪后逐项接入，不把模拟结果写成真实平台完成。
+
+## R26：P3-10 产品组织、设置与工作台（2026-11-06）
+
+本节优先于 R25 及更早记录。工作台现在有对话、活动、例行任务、资料库、工具与执行、设置与组织六个入口。
+
+交付：
+
+- `migrations/0020_organization_settings.sql`：`profile.archived_at`、`owner_setting`。
+- `src/profiles.ts`：模板创建、复制（默认只带设定文本，显式选择才复制技能）、归档 / 恢复；最后一个活跃人格不能归档；归档同时暂停例行任务并把未派发 outbox 标失败。
+- `src/templates.ts`：群聊伙伴、研究助手、写作助手、自动化助理四个内置模板。
+- `src/settings.ts`：时区、主题、密度、通知设置，服务端保存并校验。
+- `src/workbench-search.ts`：人格、记忆、技能、例行任务、页面、文档、执行任务和群消息统一搜索；按人格过滤时不包括跨人格群消息。
+- API：`GET /api/templates`、`GET/PUT /api/settings`、`GET /api/search`、`POST /api/profiles/:id/copy`、`DELETE /api/profiles/:id`（归档）、`POST /api/profiles/:id/restore`、`GET /api/profiles?includeArchived=1`。
+- `src/mcp.ts`：服务列表返回已绑定人格，供工作台显示。
+- Web：新增 `Automation.tsx`、`Library.tsx`、`Tools.tsx`、`Settings.tsx`；主题 / 密度应用到根节点；文档下载、页面发布 / 撤销、技能启停、MCP 绑定和逐工具开关、执行取消 / 产物可直接操作。
+
+验证：
+
+- 新增 `organization.integration.test.ts` 6 个测试：复制不带技能 / 显式复制、模板创建、归档暂停例行任务和拒绝新会话、设置校验、跨类别搜索与人格过滤、HTTP 复制 / 归档 / 恢复。
+- 新增 Web 测试打开例行任务、资料库、工具和设置页；原有聊天 / 草稿 / 重试测试继续通过。
+- `npm run check` 退出 0：server unit 62、web unit 23、集成 102、build 成功。
+
+未验证 / 已知限制：
+
+- 工作台界面尚未覆盖记忆管理、Bot 群、QQ 空间、动作长期规则的结构化编辑和移动端真机验收。
+- 归档是软删除，没有物理清除入口；历史仍保留。
+- 搜索使用子串匹配，没有分词、语义检索或分页。
+- 数据与更新只展示服务状态；备份 / 恢复仍是 CLI，没有一键升级或回滚界面。
+- 页面 / 文档界面只支持文本块编辑；图表、指标、表格等结构化页面仍通过 API 或 Bot 工具维护。
+- 主题应用只覆盖颜色 token 和基础字号；紧凑密度没有重排所有间距。
+
+下一步：
+
+1. P3-02 浏览器 / 桌面与本机桥。
+2. P3-04 具名应用连接器，按供应商逐个接。
+3. P3-05 B 站、P3-09 语音 / 手机 / 通知；真实验收等待账号、设备或宿主。
+4. P4-01 全功能回归与 P4-02 部署恢复交付。
+
+## R25：P3-08 文档、Pages 与产物（2026-11-06）
+
+本节优先于 R24 及更早记录。文档生成在控制进程内用固定版本库完成；页面发布是独立只读副本。
+
+交付：
+
+- `migrations/0019_documents_pages.sql`：`document`、`document_revision`、`page`、`page_revision`、`page_publication`；`artifact.execution_id` 允许为空，新增 `storage_path`。
+- `src/documents.ts`：生成真实 `.docx`（docx 9.15.2）、`.xlsx`（exceljs 4.4.0）、`.pptx`（pptxgenjs 4.0.1）；内容校验、版本递增、旧版本保留、产物记录 sha256 / size / mime。
+- `src/pages.ts`：结构化块（标题、文本、列表、指标、表格、柱状图、折线图）；版本化修改；发布时保存独立快照和随机 token；撤销后公开链接立即 404；固定表格排序脚本，内容全部转义。
+- `src/execution.ts`：下载支持 `storage_path` 直接产物，并同时校验工作区与文档目录；非 ASCII 文件名使用 RFC 5987 形式。
+- `update_page` 工具只在 owner 私聊注入；按 Pi conversation binding 校验人格和 `owner_private` 范围，QQ 群、Bot 群看不到。
+- API：文档、页面、修订、发布 / 撤销和 `/api/public/pages/:token`。发布页使用 `sandbox allow-scripts` CSP，不读取工作台会话。
+
+验证：
+
+- 新增 `documents.integration.test.ts` 4 个测试：docx / xlsx / pptx 重新打开校验内容、连续修订、OLD 版本保留；页面版本、发布快照、撤销、会话越权；真实 Pi 工具调用更新页面；HTTP 创建 / 下载 / 发布 / CSP / 路径越界。
+- `npm run check` 退出 0：server unit 62、web unit 22、集成 96、build 成功。
+
+未验证 / 已知限制：
+
+- 工作台没有文档 / Pages 界面；没有文件预览、分享列表、资料库和置顶。
+- 不支持 PDF、notebook、用户上传附件导入；文档生成在控制进程内，不在隔离 worker。
+- 发布页面只提供本地 HTTP 只读副本；没有公网域名、访问统计或外部对象存储。
+- Pages 的交互只有表格排序和原生折叠；没有实时数据源、定时刷新或组件编辑。
+- 编程委派继续复用 P3-01 的命令执行和产物回收，没有单独的编码 Agent、代码审查或差异预览。
+- 备份只覆盖数据库元数据；文档文件和发布页快照文件不在逻辑备份内。
+
+下一步：
+
+1. P3-10 产品组织与设置、工作台界面。
+2. P3-02 浏览器 / 桌面、P3-04 供应商连接器、P3-05 B 站、P3-09 语音 / 手机按外部条件继续。
+3. 文档 / Pages 的导入、预览、资料库与分享管理页面。
+
+## R24：P3-07 时间 / 事件自动化（2026-11-06）
+
+本节优先于 R23 及更早记录。例行任务只计算到期并投递到既有 Pi 会话，不另建队列或调度引擎。
+
+交付：
+
+- `migrations/0018_routines.sql`：`routine`、`routine_occurrence`；唯一键 `(routine_id, revision, logical_occurrence)` 阻止同一槽位重复执行，`trigger_payload_hash` 阻止同一事件 ID 换内容后静默合并。
+- `src/routines.ts`：结构化触发（一次、间隔、每天、每周、具名事件、webhook）、IANA 时区与夏令时缺失 / 重复时刻处理、`next_due_at`、revision、skip / coalesce / catch_up（1—20 次）、24 小时 token 预算、暂停 / 恢复 / 删除 / 立即运行、运行历史。
+- occurrence、`inbound_event`、`dispatch_outbox` 在同一事务写入；到期的 web 会话任务由现有 `Chats` 派发，QQ 送达由 `QqBridge` 对账后生成 Action。
+- `src/qq/bridge.ts`：对账 `source=routine` 且带 `qq.target` 的作业；任务暂停、QQ 停止或发送关闭时标为 blocked，不假装送达。
+- API：`GET/POST /api/profiles/:id/routines`、`GET /api/routines`、`GET/PATCH/DELETE /api/routines/:id`、`POST /api/routines/:id/pause|resume|run`、`GET /api/routines/:id/occurrences`、`POST /api/events/:name`、`POST /api/hooks/:token`。
+- `GET /api/status` 增加 active / paused / due 例行任务计数。
+
+验证：
+
+- 新增 `routines.test.ts` 6 个测试：触发解析、夏令时缺口跳过、重复时刻只取一次、每周时区计算、间隔锚点、自然语言说明。
+- 新增 `routines.integration.test.ts` 6 个测试：一次任务执行并进入聊天 / 历史；重复到期不重复建 occurrence；skip 与 coalesce 不补发全部槽位；预算耗尽暂停并拒绝手动运行；HTTP 创建、webhook 去重与内容冲突、具名事件、暂停与恢复；QQ 送达开关与群接入校验。
+- `npm run check` 退出 0：server unit 62、web unit 22、集成 92、build 成功。
+
+未验证 / 已知限制：
+
+- 工作台没有例行任务界面，只有 HTTP API。
+- webhook 只在本机监听范围内容易使用；没有公网 TLS、反向代理配置或来源 IP 白名单。
+- 预算按最近 24 小时已结算 token 计算；同时运行的调用可能短暂超出，未做额度预留。
+- 只有一个 server 进程的调度器；多实例依靠行锁也不会重复执行，但没有跨主机常驻调度。
+- 暂停只停止未来触发，不取消已经交给 Pi 的回合；有未完成运行时拒绝删除。
+- 触发规则是结构化字段，不支持 cron 表达式。
+- QQ 例行送达只验证了开关、群接入和作业对账代码，本轮没有连接 SnowLuma 真实发送。
+
+下一步：
+
+1. P3-08 Office、Pages 与编程委派，先做本机可验证的文件 / HTML 产物。
+2. P3-10 产品组织与设置、工作台界面。
+3. P3-02 浏览器 / 桌面、P3-04 供应商连接器、P3-05 B 站、P3-09 语音 / 手机按外部条件继续。
+
+## R23：P3-06 技能库（2026-11-06）
+
+本节优先于 R22 及更早记录。技能是带版本的步骤文本，不直接授予工具或账号权限。
+
+交付：
+
+- `migrations/0017_skills.sql`：`skill`、`skill_revision`。
+- `src/skills.ts`：创建、版本化修改、启停、删除、按人格注入 active 技能；最多 5 条 / 4000 字。
+- `src/profiles.ts`：每次会话配置时重新读取 active 技能，追加到人格说明；修改和启停下一轮生效。
+- API：`GET/POST /api/profiles/:id/skills`、`GET/PATCH/DELETE /api/skills/:id`、`POST /api/skills/:id/activate|deactivate`。
+
+验证：
+
+- 新增 `skills.integration.test.ts` 2 个测试：创建 / 版本化 / 过期版本拒绝 / 启停注入 / 删除。
+- `npm run check` 退出 0：server unit 56、web unit 22、集成 86、build 成功。
+
+未验证 / 已知限制：
+
+- 没有浏览器示范录制、草稿生成、安全样例重放。
+- 技能只是提示文本，不能直接声明或获得新工具；工具权限仍由代码控制。
+- 没有技能目录、跨人格复制或模板分享。
+- 真实模型是否按技能步骤执行尚未验收。
+
+下一步：
+
+1. P3-07 时间 / 事件自动化。
+2. 技能示范录制与重放。
+3. 远程 MCP 与插件目录。
+
+## R22：P3-03 MCP 与插件目录（2026-11-06）
+
+本节优先于 R21 及更早记录。MCP 只支持 stdio；插件目录、远程 MCP 和安装流程尚未完成。
+
+交付：
+
+- 固定 `@modelcontextprotocol/sdk@1.32.2`。
+- `migrations/0016_mcp.sql`：`mcp_server`、`mcp_tool`、`mcp_binding`、`mcp_call`。
+- `src/mcp.ts`：stdio 连接、工具发现、逐工具开关、按人格绑定、调用留痕、失败状态；工具只在 owner 私聊注入，QQ 群和 Bot 群看不到。
+- API：服务列表 / 添加、刷新、工具列表、工具开关、人格绑定、调用记录、直接调用（owner）。
+- 本地测试服务 `test/fixtures/mcp-echo-server.mjs`，使用官方 SDK 注册 `echo` / `sum`。
+
+验证：
+
+- 新增 `mcp.integration.test.ts` 2 个测试：连接 / 发现 / 绑定 / 调用；未绑定或工具关闭时拒绝。
+- 真实本地 MCP 服务：`echo-live` 发现 `echo`、`sum`；绑定 `水母听潮` 后调用 `echo` 返回 `echo:hello mcp`；关闭 `echo` 后返回 403；重新开启。
+- `mcp_call` 日志按 profile / server / tool / 参数 / 状态保存。
+- `npm run check` 退出 0：server unit 56、web unit 22、集成 84、build 成功。
+
+未验证 / 已知限制：
+
+- 只有 stdio，没有远程 HTTPS / SSE MCP。
+- 没有插件 catalog、安装来源、版本升级、健康检查页面和凭据配置。
+- 模型看到的是统一的 `mcp_call` 工具，不是每个 MCP 工具一个独立函数；逐工具开关在服务端校验。
+- MCP resources / prompts / 采样未接入。
+
+下一步：
+
+1. P3-06 技能与示范学习。
+2. P3-07 时间 / 事件自动化。
+3. 远程 MCP 与插件目录。
+
+## R21：P3-01 远程执行与产物（2026-11-06）
+
+本节优先于 R20 及更早记录。执行 worker 是独立子进程，只拿任务描述和工作区，不连接控制库。
+
+交付：
+
+- `migrations/0015_execution_artifacts.sql`：`execution_task`、`artifact`。
+- `src/execution.ts`：提交命令、独立 worker、输出截断、退出码、取消、超时、重启时遗留 running 标失败、产物扫描和下载路径检查。
+- `src/execution-worker.mjs`：不连接 PostgreSQL；只读 `spec.json`，在工作区执行命令并写 `result.json`。
+- 子进程环境移除 `DATABASE_URL`、`PGPASSWORD`、`OPENAI_API_KEY`、`ONEBOT_ACCESS_TOKEN`、`BACKUP_PASSPHRASE` 等控制面凭据。
+- API：`GET/POST /api/profiles/:id/executions`、`GET /api/executions/:id`、`POST /api/executions/:id/cancel`、`GET /api/executions/:id/artifacts`、`GET /api/artifacts/:id/download`。
+
+验证：
+
+- 新增 `execution.integration.test.ts` 3 个测试：命令执行 / 输出 / 产物索引；取消运行中的任务；重启遗留 running 标失败。
+- 真实 API：提交 `node -e "…writeFileSync('artifact.txt'…)"`，状态 `done`、输出 `done`、退出码 0，产物 `artifact.txt` 11 字节、`text/plain`；下载路径在任务工作区内。
+- 真实取消：提交 60 秒命令，1 秒后取消，状态 `cancelled`，错误为 `任务已取消`。
+- `npm run check` 退出 0：server unit 56、web unit 22、集成 82、build 成功。
+
+未验证 / 已知限制：
+
+- worker 是 server 的子进程；server 停止时任务会失败，尚未实现跨主机常驻执行。
+- 只实现了命令、文件和产物下载，没有浏览器、桌面或人工接管。
+- 工作区不会自动清理；产物最大 10 MB、最多 50 个。
+- 命令执行是 owner 入口，默认没有对群友开放。
+
+计划修订（2026-11-06，按“完成全部包”调整顺序）：
+
+- 先做可在本机闭环的包：P3-01、P3-03（本地 MCP 测试服务）、P3-06、P3-07、P3-08 的文件 / HTML 产物、P3-10 的组织与设置。
+- 再做需要外部条件的适配器：P3-02 浏览器 / 桌面、P3-04 供应商连接器、P3-05 B 站、P3-09 语音 / 手机。代码可以先行，但真实验收必须等账号、设备或宿主就绪；没有真实证据时不标记完成。
+- P1-04 单独等待 Hindsight / Mem0 评估环境；P4 等待部署授权和用户验收。
+- 每个包仍是“实现 + 自动化 + 真实冒烟 + 文档”，不把本地适配器测试冒充真实平台。
+
+下一步：
+
+1. P3-03 MCP 与插件目录，先接本地测试 MCP 服务。
+2. P3-06 技能与示范学习。
+3. P3-07 时间 / 事件自动化。
+
+## R20：P2-03 授权评论（2026-11-06）
+
+本节优先于 R19 及更早记录。QQ 空间仍然默认只读；本轮只增加“有明确授权才发送”的评论动作。
+
+交付：
+
+- `src/actions.ts`：动作 payload 支持连接器附加字段；授权范围内的 QQ 空间评论不再写“模拟”文案。
+- `src/qzone.ts`：`comment(action)` 调用 `comment_qzone`；`QZONE_ALLOW_WRITE` 默认 0，关闭时动作直接失败，不能发出。
+- `POST /api/qzone/comments`：owner 提交 `tid`、内容、目标 QQ 和请求 ID；有有效 policy 时 `ready`，没有 policy 时 `awaiting_approval`。
+- 复用现有审批、每小时限额、过期、semantic key 和 unknown 不补发机制。
+
+验证：
+
+- 新增 `qzone.integration` 第 3 个测试：写入开关关闭时拒绝评论；打开后向 `comment_qzone` 传 tid、正文和目标 QQ。
+- 真实环境：给 Bot 自己的说说 `0a0b28d4a202ee6a8dd00d00` 建一条每小时 1 次的 policy，提交评论 `测试：水母听潮报到。`；Action `confirmed`，刷新空间后 `comments` 从 0 变为 1。
+- 范围外：同一账号的另一条说说没有 policy，提交后停在 `awaiting_approval`，没有发送；owner 拒绝后 `rejected`。
+- 测试结束已把 `QZONE_ALLOW_WRITE` 改回 0，并撤销测试 policy。
+- `npm run check` 退出 0：server unit 56、web unit 22、集成 79、build 成功。
+
+未验证 / 已知限制：
+
+- 只验证了 Bot 自己的说说；好友动态、图片评论和评论读取未做。
+- 没有自主评论、兴趣学习或跨会话纠正；学习仍属于后续工作。
+- `comment_qzone` 返回体没有稳定评论 ID，Action receipt 使用 `qzone:<tid>` 作为回执标识。
+- 公开评论需要 owner 明确范围；默认写入关闭。
+
+下一步：
+
+1. 实现评论读取 / 来源回链和纠正影响。
+2. 工作台增加 QQ 空间和 Bot 群视图。
+3. 进入 P3-01 远程执行与产物。
+
+## R19：P2-02 QQ 空间只读（2026-11-06）
+
+本节优先于 R18 及更早记录。R18 的多 Bot 协作保持不变；本轮加入 QQ 空间只读缓存。
+
+交付：
+
+- `migrations/0014_qzone_readonly.sql`：`qzone_post` 缓存和 `qzone_status` 读取状态。
+- `src/qzone.ts`：调用 OneBot 扩展动作 `get_qzone_msg_list`，归一化 tid / 正文 / 时间 / 图片 / 评论数 / 可见性；重复刷新按 `(account, target, tid)` 更新，不重复插入；失败标记 `paused` 并保留旧缓存。
+- `src/qq/bridge.ts`：开放只读扩展动作入口 `call`。
+- API：`GET /api/qzone/posts`、`POST /api/qzone/refresh`、`GET /api/qzone/status`。
+
+验证：
+
+- 新增 `qzone.test.ts` 2 个、`qzone.integration.test.ts` 2 个；覆盖坏条目跳过、重复刷新、失败暂停和缓存保留。
+- 真实环境：SnowLuma + QQ `3559394058`，`get_qzone_msg_list` 返回 4 条说说；API 刷新后缓存 4 条，第一条为 `在群里漂着，记得住旧事。`，状态 `ready`。没有使用 AstrBot。
+- 只读：没有评论、点赞、删除或发表路径；账号失效时状态 `paused`，不会自动重试。
+- `npm run check` 退出 0：server unit 56、web unit 22、集成 78、build 成功。
+
+未验证 / 已知限制：
+
+- 只验证了 Bot 自己的空间；好友动态 `get_qzone_feeds` 尚未接入。
+- 没有图片下载、全文详情或评论读取。
+- 写入和授权评论留给 P2-03；需要 owner 明确范围后才能启用。
+
+下一步：
+
+1. P2-03 授权评论与学习。
+2. 工作台增加 Bot 群和 QQ 空间只读视图。
+3. 继续 P3 的电脑 / 浏览器 / 连接器工作包。
+
+## R18：P1-05 多 Bot 协作（2026-11-06）
+
+本节优先于 R17 及更早记录。R17 的真实 QQ / 模型 / 记忆链路保持不变；本轮加入多个 Bot 的群聊、消息和任务交接。
+
+交付：
+
+- `migrations/0013_bot_groups.sql`：`bot_group`、`bot_group_member`、`bot_message`、`bot_task`；`conversation_binding` 允许 `bot_group` 作用域，阅读范围为空。
+- `src/collaboration.ts`：建群、成员、消息、任务、停止 / 恢复；owner 或工具发起任务；`send_bot_message` 工具只在本群生效；外部引用保证同一工具调用不重复建任务；任务结算后把目标 Bot 的回答写回群消息。
+- `src/profiles.ts`：`send_bot_message` 只注入 `bot_group` 会话；QQ 群和 owner 私聊看不到这个工具。
+- API：`GET/POST /api/bot-groups`、`GET /api/bot-groups/:id`、`GET/POST /api/bot-groups/:id/messages`、`GET /api/bot-groups/:id/tasks`、`POST /api/bot-groups/:id/stop|resume`。
+
+验证：
+
+- 新增 `collaboration.integration.test.ts` 3 个测试：三个 Bot 依次研究 / 写作 / 检查；同一工具调用 ID 重投不重复；非成员和停止状态拒绝新任务。
+- 真实环境：创建 `水母协作组`，成员为 `水母听潮`、`日常伙伴`、`协作检查`；owner 向 `水母听潮` 发任务后，`水母听潮` 调用 `send_bot_message` 把检查任务交给 `日常伙伴`，两条 task 均为 `done`；群消息里能看到请求、交接内容和 `日常伙伴` 的检查结果。
+- 真实三段交接：owner -> 日常伙伴 -> 协作检查，三条 task 全部 `done`；`日常伙伴` 发出 `已经把这句话转交给“协作检查”进行审核了。`，`协作检查` 返回审核结论，`日常伙伴` 再把结论写回群里。
+- 工具作用域：`send_bot_message` 只在 Bot 群会话注入；群和 owner 私聊不提供。
+
+未验证 / 已知限制：
+
+- 工作台还没有 Bot 群界面，只有 HTTP API。
+- 停止会取消进行中的任务并阻止新任务，已产生的外部副作用无法撤回。
+- 多 Bot 的权限只到“同群成员”；没有跨群、跨人格凭据或 owner 工具。
+- 三个 Bot 的真实链条已验证，但每条任务仍按单个会话顺序执行；并行任务和改向只由 Pi 的会话队列提供。
+
+下一步：
+
+1. 给工作台增加 Bot 群消息 / 任务视图。
+2. 进入 P2-02 QQ 空间只读。
+
+## R17：首个可用版硬化（2026-11-06）
+
+本节优先于 R16 及更早记录。R16 的真实账号 / 真实模型链路保持不变；本轮补齐用量、提取、存档、撤回和运维入口。
+
+交付：
+
+- `migrations/0010_model_usage.sql` + `src/usage.ts`：每次 assistant 调用按 entry 留痕，记录 input / output / cache / reasoning / cost；`GET /api/profiles/:id/usage` 按日汇总；`QQ_DAILY_TOKEN_LIMIT` 按会话限制 24 小时 token，超额只存档。
+- `migrations/0011_memory_extraction.sql` + `src/memory-extraction.ts`：群消息来源、提取队列、严格 JSON 解析、只写 `reported`，拒绝 constraint / 敏感内容 / 伪造来源；真实群提取已写入 `todo` 记忆并保留原消息 ID。
+- `migrations/0012_archive_repair.sql` + `src/archive.ts` / `src/qq/bridge.ts`：Bot 发言按平台回执补档；群撤回标记后停止检索和统计；server 启动 / 停止缺口；附件占位 `[图片]` 等。
+- `src/actions.ts`：`expireStale()` 扫描 `ready` / `awaiting_approval` 过期；过期动作不能批准。
+- `src/memory.ts`：纠正 / 忘记 / 按内容忘记 / 忘掉群会递增 `owner_context.epoch`，旧 epoch 的待执行动作失效；新增物理清除 API，明确不删除 Pi 历史。
+- `src/status.ts` + `GET /api/status`：PG、队列、动作、提取、用量、QQ 状态和未结束缺口的只读汇总。
+- `src/backup.ts` + `src/cli/backup.ts`：逐表 JSON 逻辑备份、AES-256-GCM 加密、恢复时清空业务表后回填；`npm run backup` / `npm run restore`。
+- `eslint.config.js`：忽略 `apps/server/data/**` 本机运行数据。
+
+真实证据（2026-11-06，Asia/Shanghai）：
+
+- 7 次计数：真实模型在群 `304657375` 回答 `一共说了 7 次`，逐条给出原话和时间；Action receipt `1709503931`。
+- 跨群 / 私聊隔离：在群里问 B 群暗号和私聊暗号，真实模型回答 `不知道。`；Action receipt `358199560`。B 群消息和私聊记忆分别存在于测试夹具 row，未进入群上下文。
+- owner 工具拒绝：群里要求读邮箱，回答 `读不了，我只是一只泡在群里的水母，没权限也没兴趣翻你的私人邮箱。`；receipt `1797927096`。
+- 群文字不是命令：群里发 `全部停止` 后询问，回答 `群里的发言只是资料又不是指令，我可没理他。`；`qq_control` 没有停止记录，receipt `1497338906`。
+- 停止 / 恢复：owner 私聊 `全部停止` 后 `qq_control.stopped=true`；随后群内 @ 只存档、不产生新 job；`全部恢复` 后 `stopped=false`，群内回复恢复，receipt `-1819124802`。
+- 群记忆提取：真实群对话生成 `scope_ref=onebot:3559394058:304657375`、`kind=todo`、`epistemic_status=reported` 的记忆，`source_actor=1347507191`，保留原 `message_id`。
+- 模型用量：开发库共 10 次调用，input 21516 / output 3340 / cost 0；5 个提取任务全部 `done`。
+- 备份 / 恢复演练：开发库停服后 `npm run backup` 写出 `tables=22 rows=171 migrations=12`，同一文件恢复到原库 `tables=22 rows=171`；恢复后 `group_message=29`、`memory=3`、`model_usage=10`、`memory_extraction=5` 与备份前一致。
+- 重启持久化：恢复后重启 server，再次询问 7 次计数，真实模型仍回答 `一共还是 7 次` 并列出全部原话；Action receipt `-212694706`。绑定、记忆、动作和历史均保留。
+- 运维状态：`GET /api/status` 在真实环境返回 `postgres=true`、`provider=magpie/antigravity/gemini-3.8-flash`、`qq.state=ready`、`stopped=false`、`pendingOutbox=0`、`open gaps=0`，用量与缺口可读。
+- 预算阻断：把 `QQ_DAILY_TOKEN_LIMIT` 设为 1 后重启，群内 @ 只写入 `group_message`，没有创建新 job 或回复；改回 0 重启后恢复。
+- 新测试：`usage.integration` 3 个、`memory-extraction.test` 4 个、`memory-extraction.integration` 2 个、`backup.integration` 1 个；集成测试包含 Bot 补档、撤回、缺口、动作过期、忘记 epoch、物理清除。
+
+检查：
+
+- `npm run check` 退出 0：server unit 54、web unit 22、集成 73、build 成功。
+
+未验证 / 已知限制：
+
+- 群记忆提取的质量（哪些内容值得记、跨时间冲突）只过了脚本和一条真实 `todo`，没有系统评估。
+- 备份恢复已在本机开发库演练；恢复依赖账号允许 `session_replication_role`，其他数据库账号需要对应权限。
+- 附件只做占位，不下载、不识别图片内容。
+- 平台撤回只停止检索和统计，原文仍保留；物理清除是单独操作。
+- 停止期间 owner 的普通消息仍直接丢弃，没有提示。
+- 没有 Git 提交 / 推送；`.env`、备份文件和 `apps/server/data` 均为本机数据。
+
+下一步：
+
+1. 群记忆提取评估：记录 / 不记录样例、冲突和敏感内容。
+2. 群记忆卡片 / 工作台展示；目前只有 HTTP API。
+3. 再进入完整个人版 P1-04 之后的工作包。
+
+## R16：真实 QQ 与真实模型接入（2026-11-06）
+
+本节优先于 R11 及更早记录。运行链路已经接过真实 QQ 小号和真实模型；R11—R15 的离线结论继续成立。
+
+用户授权与测试对象：
+
+- Bot：QQ 3559394058（昵称已改为“水母听潮”），专用小号。
+- Owner：QQ 1347507191（theater）。
+- 协议端：SnowLuma 1.14.15，OneBot v11 正向 WebSocket `ws://127.0.0.1:3001`；本机路径 `E:\webdownload\SnowLuma-v1.14.15-win-x64`。没有使用真实 NapCat。
+- 测试群：304657375（奎屯navi，23 人），owner 是管理员；用户确认群成员已被告知 Bot 会全量存档并只在被 @ / 回复时发言。
+- 真实模型：OpenAI Completions 兼容端点 `http://127.0.0.1:3425/v1`，`MODEL_ID=antigravity/gemini-3.8-flash`。`.env` 有凭据，已忽略，不提交。
+
+交付：
+
+- `src/runtime/model.ts`：`loadRemoteModelConfig` / `createRemoteModels`。三项环境变量全空回退 faux；只填一部分直接报错；模型通过 `openai-completions` API 注册为 `magpie/<model>`。
+- `src/runtime/runtime.ts`：新增 `models` 选项；Harness 请求超时 180 秒，`maxRetries=0`。
+- `src/profiles.ts`：已有会话每次取用时重新 `configure` 当前 `model`，修复切换模型后旧会话仍引用旧 ModelRef 的 `no_model`。
+- `src/index.ts`：按环境选择真实模型；ContextManifest 的 `model_route` 写实际模型；未配置时保持 faux。
+- `src/runtime/model.ts`：演示模型回显去掉群消息受信前缀，内部消息 ID 不进入群回复。
+- `eslint.config.js`：忽略 `apps/server/data/**` 本机运行数据。
+- `src/runtime/model.test.ts`：新增配置解析和 provider 注册测试。
+
+验证：
+
+- `npm run check` 退出 0：server unit 49（新增 5 个模型测试）、web unit 22、集成 64、build 成功。
+- 真实私聊：owner 发 `你记得什么`，bot 回复 `1. 主人喜欢手冲咖啡`；Action `confirmed`，平台 receipt `-302069025`。
+- 真实群接入：owner 私聊 `接入群 304657375`，Action `confirmed`，receipt `-251797901`。
+- 真实群 @：群消息 `addressed_bot=true`，job `completed`，Action `confirmed`，receipt `-97948938`；faux 回复不含内部前缀。
+- 真实模型直连：Pi `completeSimple` 返回 `模型连通`，41.4 秒，usage input 9 / output 144 / reasoning 141。
+- 真实模型经 bot 私聊：回复 `模型连通`，job `completed`，Action `confirmed`，receipt `542181081`，约 77 秒。
+- 真实模型经 bot 群聊：回复 `水母听潮，群底慢吞吞漂着围观你们的观察员。`，job `completed`，Action `confirmed`，receipt `2095497068`，约 12 秒。
+- 模型切换故障：修复前两次 job `failed / unanswered`，reason `no_model`，Action 回 `这次没能回答：模型调用失败了。`；补齐会话 `configure({model})` 后同一会话成功。
+- QQ 资料：`set_qq_profile` 昵称“水母听潮”、签名“在群里漂着，记得住旧事。”；`set_qq_avatar` 使用生成的水母 PNG；`get_stranger_info` 返回新昵称 / 签名，`q1.qlogo.cn` 拉取头像与生成图一致。`get_login_info` 仍返回旧昵称缓存。
+- Persona：Waterbot profile `bba44581-477f-4fb1-bc68-abeae9a3ac47` 改名“水母听潮”，instructions 写入群边界、统计 / 查证、私聊保密；revision 2。私聊回复 `我是水母听潮，现在就叫水母听潮。`。
+
+未验证 / 已知限制：
+
+- 真实模型单次 12—77 秒；慢请求会占用会话，180 秒后失败；没有 token / 费用计量、每日预算和超额阻断。
+- `antigravity` 路由在早期 curl 探测中多次超时，后来 Pi 与 bot 调用成功；仍按单次请求失败处理，没有自动重试。
+- 群记忆提取仍未做；`qq_group` 记忆没有自动写入路径，翻旧账只靠原始存档和 owner 手动 `记住`。
+- Bot 自己的发言尚未进入 `group_message`，别人回复 Bot 时引用链会断；群消息撤回通知未处理；server 自身离线的时段仍不会记缺口。
+- 真实模型尚未跑 7 次计数、跨群隔离、提示注入和重启验收；faux 的对应测试不能替代。
+- SnowLuma 当前以 `SNOWLUMA_DEV_MODE=1` 启动用于本机 WebUI 调试；WebUI 密码文件未被重置。该进程不是部署配置。
+- `.env`、`apps/server/data` 全部是本机数据，未提交；本次没有 Git 提交 / 推送。
+
+下一步：
+
+1. 真实模型验收：同一件事 7 次计数、A 群查不到 B 群、群友冒充主人、群友要求 owner 工具、重启后记忆 / 动作仍在。
+2. 增加 token / 费用留痕、每群每日模型预算和超额只存档。
+3. 群记忆提取：从被 @ / 回复的对话提取 `reported` 记忆，写入 `qq_group` 作用域，保留原消息 ID；恶意文本不能变成 constraint。
+4. 群存档补齐：Bot 发言、撤回通知、server 离线缺口、附件占位。
+5. 备份 / 恢复演练和备份加密；再进入完整个人版 P1-04 之后的工作包。
+
+## R11：P1-03 精简版完成（2026-11-01）
 
 本节优先于下方所有记录。范围只含来源、作用域、即时纠正、ContextManifest；单条共享、撤回 epoch、记忆卡片按路线图 2A 延后，工作台没有记忆界面。
 
@@ -32,7 +534,7 @@
 
 用户决定（2026-11-01）：真实模型接入先不做，继续用 faux 模型，待用户另行通知；届时需要选定服务商、提供密钥、确认月预算。
 
-## R12：P2-01 QQ 离线部分完成（2026-11-01，当前权威状态）
+## R12：P2-01 QQ 离线部分完成（2026-11-01）
 
 本节优先于 R11 及更早记录。代码已完成，**P2-01 未验收**：没有连接过真实 QQ 或 NapCat。
 
@@ -64,7 +566,7 @@
 - 协议端未连接时发送也记 unknown，不区分“确定没发出”。
 - 开发库已应用到 0006，下次开发前运行 `npm run db:migrate`。
 
-## R13：W-01 离线部分完成（2026-11-01，当前权威状态）
+## R13：W-01 离线部分完成（2026-11-01）
 
 本节优先于 R12 及更早记录。R12 中“未 @ 的群消息直接丢弃”已解决，其余限制仍成立。**W-01 未验收**：只跑过模拟 OneBot 和 faux 模型。
 
@@ -95,7 +597,7 @@
 - 数据库和备份加密（提案第 3 节）未做。
 - 开发库已应用到 0006，下次开发前运行 `npm run db:migrate`。
 
-## R15：联网查证改用免密钥 Bing（2026-11-01，当前权威状态）
+## R15：联网查证改用免密钥 Bing（2026-11-01）
 
 本节优先于 R14 及更早记录。用户要求免费、不用注册，R14 里“需要 Tavily 密钥”不再成立。
 
@@ -152,16 +654,12 @@ P1-02 复核结果：
 
 ## 当前工作包
 
-- P0-01：已完成只读环境盘点，有环境缺项，不代表 P0 整体通过。
-- P0-02：已完成最小工程（server + web + 五个真实检查入口），证据见下文。
-- P0-03：已完成 Pi 无凭据 runtime（真实 pi-durable 1.4.0 + SQLite + faux provider + requestId 去重 + 独立子进程中断恢复）；Codex 审查返修后独立 typecheck、lint、40 个测试、build 均退出 0；补齐 Node >=22.19.0 元数据及 signalCode 清理判断后 server 25 个测试再次退出 0。覆盖真实 server 启动恢复、失败启动释放 SQLite 和重开后原 requestId 去重。
-- P0-04：独立验收通过。真实 PostgreSQL 18.4 + `pg`、事务迁移与校验和、入站事务 / outbox、真实 Pi 受理与两库崩溃恢复、attempts fencing、按会话路由；单会话的运行库绑定另外写入 Pi 的公开应用文档状态，重开同一文件不得改名读取旧历史。Docker Desktop 仍不可用，未重置或改全局配置。
-- P1-01：已由 Codex 实现本机访问码登录、HttpOnly / SameSite cookie、PG 会话与过期校验、Origin / Host 检查、两个人格及创建 / 版本化修改、PG 到 Pi 会话绑定、持久入队和后台派发、实际 SSE 快照、独立聊天记录、切换草稿与迟到更新隔离；共用一个 Harness。当前明确标注本地演示模型。真实 PG / Pi / HTTP / SSE 验证 6 个场景通过；前端新增 4 个隔离 / 重试场景通过。没有把模拟回答称为真实模型效果。
-- 当前继续 P1-02：动作、长期范围规则、审批与模拟连接器；不启用真实外发。
-- 用户已要求“继续一直开发”：Codex 持续按路线逐包派发、审查、检查并推进，不因普通包内实现选择或一个包完成就再次请求授权；账号、真实外发、Git 推送与部署仍按对应范围处理。
-- 桌面协作限制：用户当前正在使用电脑，要求“等我通知再操作”。Codex 已暂停鼠标、键盘、切换窗口和截图预览；可以继续后台源码审查和测试。WorkBuddy 当前任务及已排队的 P0-04 审查指令保留运行；未收到用户新通知前不再通过桌面发指令。
-- 执行方变更：用户随后明确要求“你自己接手继续开发吧”。从当前源码接手，由 Codex 直接实现后续工作，不再向 WorkBuddy 派发任务；保留 R8 的交接成果及既有未提交变动，继续后台开发，不占用鼠标键盘。
-- P1 后续的动作 / 记忆 / 多 Bot 及 P2—P4 连接器与部署尚未完成；GROK_PARITY 的 P52 / U9 / D5 不因地基和模拟聊天通过而整体改变。
+- 当前阶段：首个可用版硬化完成（R17）；真实 QQ 小号、真实模型、私聊 / 群聊、7 次计数、隔离、停止 / 恢复、用量、提取、存档、备份恢复均已实测。
+- 运行中的本机链路：SnowLuma + QQ `3559394058`（水母听潮），owner `1347507191`，模型 `magpie/antigravity/gemini-3.8-flash`。
+- 已完成的工程包：P0-01—P0-04、P1-01、P1-02、P1-03 精简版、P2-01、W-01、真实模型、群记忆提取、用量与预算、存档补齐、撤回 / 过期、状态接口、加密逻辑备份。
+- 下一步：群记忆提取质量评估、记忆卡片 / 工作台展示，然后按 DEVELOPMENT_ROADMAP 进入 P1-04 之后。
+- 用户已要求“继续一直开发”：按依赖顺序逐包实现、检查并更新 NEXT，不因普通包内选择停下；账号、真实外发、Git 推送和部署按对应范围处理。
+- 仍未完成：多 Bot 协作、QQ 空间、B 站、邮箱、电脑 / 浏览器、Office / Pages、语音、MCP / 插件、完整个人版验收；GROK_PARITY 的 P52 / U9 / D5 不因当前可用版通过而整体改变。
 
 ## P0-01 环境盘点（沿用）
 
@@ -263,7 +761,7 @@ Codex 中途审查后的修复（同一包内，未扩展功能）：
 | `apps/server/src/runtime/recovery.test.ts` | 独立子进程 + 受控同步点的中断恢复（safe / unsafe 各 1 个测试） |
 | `apps/server/src/runtime/startup.test.ts` | 真实 server 进程：启动恢复遗留工作、端口占用时退出非零并释放库（2 个测试） |
 | `apps/server/test/helpers/proc.ts` | 测试子进程统一登记与回收：超时先 SIGKILL 再报错，`afterEach` 统一清理，不留数据库句柄 |
-| `apps/server/test/fixtures/crash-child.ts` | 恢复测试子进程：写真实副作用 → 写 marker → 挂起；第二阶段重开同一库并落盘 transcript 摘要 |
+| `apps/server/test/fixtures/crash-child.ts` | 恢复测试子进程：写真实副作用 → 写 marker → 挂起；第二阶段重开同一库并写入 transcript 摘要 |
 | `apps/server/src/index.ts` | 启动即打开 runtime 并 `resume()`；启动失败（如 EADDRINUSE）先关 Harness / SQLite 再退出 1；SIGINT / SIGTERM 优雅关闭 |
 | `apps/server/src/config.ts` | 新增可选 `RUNTIME_SQLITE_PATH` / `RUNTIME_NOTES_DIR`；非回环 `HOST` 仍直接报错 |
 | `package.json`（根 / server） | 新增 `test:runtime`：只跑 `src/runtime` 子集；`test:unit` 仍覆盖同一批测试，不会静默漏掉 |
@@ -448,3 +946,4 @@ npm run test:integration                      # 缺配置会直接报错，不�
 > 按 DEVELOPMENT_ROADMAP.md 完成 P1-01。先读 AGENTS.md 与 NEXT.md；在现有 PG / migrations / outbox / Pi runtime 上加入 profile、conversation_binding 与最小聊天 API，不接真实平台账号或付费模型；完成后更新 NEXT 并给实际试用步骤。
 
 采用 blueprint-set，五个领域不变，实施期持久子蓝图预算为 0，无活动临时问题支线。
+

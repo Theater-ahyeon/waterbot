@@ -8,6 +8,7 @@ import { ingestInboundEvent } from './inbound/ingest'
 import type { Pool } from './pg/connection'
 import { Profiles, type ConversationTarget, type Profile } from './profiles'
 import type { AgentRuntime } from './runtime'
+import { recordUsage } from './usage'
 
 export interface ChatMessage {
   id: string
@@ -81,7 +82,9 @@ export class Chats {
     const bindings = (await this.pool.query<{ profile_id: string; conversation_key: string; scope_kind: ConversationTarget['scopeKind']; scope_ref: string; readable_groups: string[] }>(
       `select distinct b.profile_id, b.conversation_key, b.scope_kind, b.scope_ref, b.readable_groups from dispatch_outbox o
        join conversation_binding b on b.conversation_key = o.conversation_key
-       where o.status = 'pending' and (o.lease_until is null or o.lease_until < clock_timestamp())`,
+       join profile p on p.id = b.profile_id
+       where o.status = 'pending' and (o.lease_until is null or o.lease_until < clock_timestamp())
+         and p.archived_at is null`,
     )).rows
     for (const binding of bindings) {
       if (this.closed) return
@@ -111,6 +114,7 @@ export class Chats {
       `select j.id, j.pi_submission_id from job j join dispatch_outbox o on o.id = j.dispatch_outbox_id
        where o.conversation_key = $1 and j.status = 'dispatched'`, [key],
     )).rows
+    const completed: { jobId: string; answerId: string }[] = []
     for (const job of jobs) {
       const id = Number(job.pi_submission_id)
       if (!Number.isSafeInteger(id) || id < 1) throw new Error('提交映射无效')
@@ -120,9 +124,27 @@ export class Chats {
       if (record.status === 'done' || record.status === 'unanswered') {
         await this.pool.query('update job set status = $2, pi_status = $3, updated_at = now() where id = $1',
           [job.id, record.status === 'done' ? 'completed' : 'failed', record.status])
+        if (record.status === 'done') completed.push({ jobId: job.id, answerId: String(record.answer) })
       }
     }
     const view = await conversation.context(BACKGROUND_CONTEXT)
+    for (const item of completed) {
+      const entry = view.entries.find((candidate) => String(candidate.id) === item.answerId)
+      if (!entry) continue
+      try {
+        await recordUsage(this.pool, {
+          profileId: profile.id,
+          conversationKey: key,
+          jobId: item.jobId,
+          entryId: item.answerId,
+          model: entry.model,
+          provider: this.runtime.model.provider,
+          modelId: this.runtime.model.modelId,
+        })
+      } catch (error) {
+        console.error('[chat] 用量记录失败:', error instanceof Error ? error.message : String(error))
+      }
+    }
     const messages: ChatMessage[] = []
     for (const entry of view.entries) {
       if (entry.kind !== 'pi.user' && entry.kind !== 'pi.assistant') continue

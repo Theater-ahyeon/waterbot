@@ -46,17 +46,27 @@ export function textField(value: unknown, field: string, max: number, empty = fa
   return value
 }
 
-export function requireLocalOrigin(req: IncomingMessage, write: boolean): void {
+/** 由 Host 和可选的反向代理地址得到允许的 Origin；非本机且未配置时拒绝。 */
+export function originForRequest(host: string | undefined, publicOrigin?: string): string {
   let expected: URL
   try {
-    expected = new URL(`http://${req.headers.host ?? ''}`)
+    expected = new URL(`http://${host ?? ''}`)
   } catch {
     throw new HttpError(403, '请求来源无效')
+  }
+  const publicUrl = publicOrigin ? new URL(publicOrigin) : undefined
+  if (publicUrl && expected.host === publicUrl.host) {
+    return publicUrl.origin
   }
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(expected.hostname) || expected.username || expected.password) {
     throw new HttpError(403, '只允许本机访问')
   }
-  if (write && req.headers.origin !== expected.origin) {
+  return expected.origin
+}
+
+export function requireLocalOrigin(req: IncomingMessage, write: boolean, publicOrigin?: string): void {
+  const expected = originForRequest(req.headers.host, publicOrigin)
+  if (write && req.headers.origin !== expected) {
     throw new HttpError(403, '请求来源不匹配')
   }
 }

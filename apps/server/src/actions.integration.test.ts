@@ -55,6 +55,13 @@ describe('动作与范围审批（真实 PostgreSQL，模拟连接器）', () =>
     expect(statuses.filter((status) => status === 'awaiting_approval')).toHaveLength(2)
   })
 
+  it('待审动作过期后不能批准，扫描会标记 expired', async () => {
+    const stale = await service.propose(profile, input('stale'))
+    await db.pool.query("update action set expires_at=clock_timestamp()-interval '1 second' where id=$1", [stale.id])
+    await expect(service.decide(stale.id, decide(stale))).rejects.toThrow('动作已过期')
+    expect((await service.list(profile)).find((action) => action.id === stale.id)?.status).toBe('expired')
+  })
+
   it('修改已批准的内容后必须重新批准，旧版本的批准不能复用', async () => {
     const original = await service.propose(profile, input('edit', 'old text'))
     await service.decide(original.id, decide(original))

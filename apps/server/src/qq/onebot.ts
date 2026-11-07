@@ -13,6 +13,7 @@ export interface QqMessage {
   replyTo?: string
   /** 图片、语音等非文本段；首版只标记，不下载 */
   hasAttachment: boolean
+  attachments: string[]
 }
 
 interface Segment { type: string; data: Record<string, unknown> }
@@ -68,19 +69,42 @@ export function parseMessage(raw: unknown, botId: string): QqMessage | undefined
   const parts: string[] = []
   let mentionsBot = false
   let replyTo: string | undefined
-  let hasAttachment = false
+  const attachments: string[] = []
   for (const segment of segments) {
     if (segment.type === 'text') parts.push(String(segment.data.text ?? ''))
     else if (segment.type === 'at') mentionsBot ||= id(segment.data.qq) === botId
     else if (segment.type === 'reply') replyTo = id(segment.data.id)
-    else if (segment.type === 'image' || segment.type === 'record' || segment.type === 'video' || segment.type === 'file') hasAttachment = true
+    else if (segment.type === 'image' || segment.type === 'record' || segment.type === 'video' || segment.type === 'file') {
+      attachments.push(segment.type)
+    }
   }
   return {
-    kind, userId, messageId, time, text: parts.join('').trim(), mentionsBot, hasAttachment,
+    kind, userId, messageId, time, text: parts.join('').trim(), mentionsBot,
+    hasAttachment: attachments.length > 0, attachments,
     ...(groupId && kind === 'group' ? { groupId } : {}),
     ...(replyTo ? { replyTo } : {}),
     ...(nickname ? { nickname } : {}),
   }
+}
+
+export function attachmentSummary(types: readonly string[]): string {
+  const names: Record<string, string> = { image: '图片', record: '语音', video: '视频', file: '文件' }
+  return types.map((type) => `[${names[type] ?? '附件'}]`).join('')
+}
+
+export interface QqRecall {
+  groupId: string
+  messageId: string
+}
+
+/** OneBot 群撤回通知；不是消息，不能进 parseMessage。 */
+export function parseRecall(raw: unknown): QqRecall | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const event = raw as Record<string, unknown>
+  if (event.post_type !== 'notice' || event.notice_type !== 'group_recall') return undefined
+  const groupId = id(event.group_id)
+  const messageId = id(event.message_id)
+  return groupId && messageId ? { groupId, messageId } : undefined
 }
 
 /** 文本段发送：回复内容里的 CQ 码不会被协议端当成指令解析。 */
